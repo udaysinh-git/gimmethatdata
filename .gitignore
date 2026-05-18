@@ -1,0 +1,60 @@
+# gimmethatdata — gitignore
+
+# Dev journal + run artifacts (never committed)
+.ignore/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+wheels/
+*.whl
+
+# uv / virtualenv
+.venv/
+venv/
+env/
+.python-version.local
+
+# Test / coverage / mypy / ruff cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.tox/
+.nox/
+.hypothesis/
+
+# State / output (anything we write at runtime)
+out/
+output/
+*.sqlite
+*.sqlite-journal
+*.db
+
+# Playwright browsers (downloaded per-machine)
+.playwright/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Secrets / config overrides
+.env
+.env.local
+gimmethatdata.local.toml

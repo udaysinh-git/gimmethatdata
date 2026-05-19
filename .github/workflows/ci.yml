@@ -54,7 +54,7 @@ jobs:
           enable-cache: true
 
       - run: uv python pin 3.13
-      - run: uv sync --extra bypass
+      - run: uv sync --extra bypass --extra media --extra state --extra pdf --extra instagram
 
       - name: Install Playwright browsers
         run: uv run playwright install --with-deps chromium

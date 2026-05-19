@@ -60,8 +60,11 @@ ocr = [
 pdf = [
     "markdown>=3.6",
 ]
+instagram = [
+    "instaloader>=4.13",
+]
 all = [
-    "gimmethatdata[bypass,media,state,ocr,pdf]",
+    "gimmethatdata[bypass,media,state,ocr,pdf,instagram]",
 ]
 
 [project.scripts]
@@ -142,6 +145,7 @@ module = [
     "pytesseract",
     "markdown",
     "pypdf",
+    "instaloader",
 ]
 ignore_missing_imports = true
 

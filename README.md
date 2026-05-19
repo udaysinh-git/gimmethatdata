@@ -58,6 +58,12 @@ uv run gimmethatdata search "embedding model" --out ./out --reindex
 # discover subdomains via Certificate Transparency
 uv run gimmethatdata subdomains example.com
 
+# archive an Instagram profile (posts + reels + optional highlights + comment insights)
+uv run gimmethatdata instagram udaysinh --pdf
+#   --login <user> / --session-file <path>   needed for comments, highlights, stories
+#   --limit 25                                stop after N posts (handy for sanity runs)
+#   --no-analyze-comments                     skip the insights report
+
 # export everything you've scraped to a PDF (images embedded, video links badged)
 uv run gimmethatdata export-pdf ./out/example.com --out report.pdf
 

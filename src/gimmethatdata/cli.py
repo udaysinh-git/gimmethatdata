@@ -809,6 +809,214 @@ async def _run_watch(
 
 
 @app.command()
+def instagram(
+    username: Annotated[str, typer.Argument(help="Instagram handle (no @).")],
+    out: Annotated[
+        Path,
+        typer.Option("--out", "-o", help="Output root."),
+    ] = Path("out"),
+    login_user: Annotated[
+        str | None,
+        typer.Option("--login", help="Login as this username (prompted for password if --password isn't set)."),
+    ] = None,
+    password: Annotated[
+        str | None,
+        typer.Option(
+            "--password",
+            help="Password for --login. Prefer --session-file in scripts.",
+        ),
+    ] = None,
+    session_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--session-file",
+            help="Reuse an existing instaloader session file (preferred; supports 2FA accounts).",
+        ),
+    ] = None,
+    posts: Annotated[bool, typer.Option("--posts/--no-posts")] = True,
+    reels: Annotated[bool, typer.Option("--reels/--no-reels")] = True,
+    highlights: Annotated[bool, typer.Option("--highlights")] = False,
+    stories: Annotated[bool, typer.Option("--stories")] = False,
+    comments: Annotated[
+        bool,
+        typer.Option(
+            "--comments/--no-comments",
+            help="Collect comments (needs login). Auto-skipped when anonymous.",
+        ),
+    ] = True,
+    analyze: Annotated[
+        bool,
+        typer.Option(
+            "--analyze-comments/--no-analyze-comments",
+            help="After download, run the comment-insights report.",
+        ),
+    ] = True,
+    download_images: Annotated[
+        bool, typer.Option("--download-images/--no-download-images")
+    ] = True,
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Cap the number of posts/reels fetched.")
+    ] = None,
+    pdf: Annotated[
+        bool,
+        typer.Option("--pdf", help="Auto-export the downloaded profile to PDF after."),
+    ] = False,
+) -> None:
+    """Archive an Instagram profile (posts / reels / highlights / comments).
+
+    No video downloads — only photos + cover frames + caption + metadata.
+
+    Note: Instagram's ToS prohibits unauthorized automated access. Only use this
+    on accounts you own, accounts that grant you permission, or genuinely public
+    profiles where archiving falls under your jurisdiction's fair-use rules.
+    """
+    if password is not None and login_user is None:
+        raise typer.BadParameter("--password requires --login")
+    if (highlights or stories or comments) and not (login_user or session_file):
+        console.print(
+            "[yellow]note:[/] highlights / stories / comments need login. "
+            "Pass --login <user> or --session-file <path> to enable them."
+        )
+    asyncio.run(
+        _run_instagram(
+            username=username,
+            out=out,
+            login_user=login_user,
+            password=password,
+            session_file=session_file,
+            posts=posts,
+            reels=reels,
+            highlights=highlights,
+            stories=stories,
+            comments=comments,
+            analyze=analyze,
+            download_images=download_images,
+            limit=limit,
+            pdf=pdf,
+        )
+    )
+
+
+async def _run_instagram(
+    *,
+    username: str,
+    out: Path,
+    login_user: str | None,
+    password: str | None,
+    session_file: Path | None,
+    posts: bool,
+    reels: bool,
+    highlights: bool,
+    stories: bool,
+    comments: bool,
+    analyze: bool,
+    download_images: bool,
+    limit: int | None,
+    pdf: bool,
+) -> None:
+    from gimmethatdata.instagram import (
+        IGDownloadOptions,
+        IGLoginError,
+        InstagramClient,
+        download_profile,
+    )
+    from gimmethatdata.instagram.comments import analyze as analyze_comments
+    from gimmethatdata.instagram.comments import write_report
+
+    try:
+        if session_file is not None and session_file.exists():
+            client = InstagramClient.from_session_file(
+                username=login_user or username,
+                session_file=session_file,
+            )
+        elif login_user is not None:
+            pw = password if password is not None else typer.prompt("password", hide_input=True)
+            client = InstagramClient.login(
+                username=login_user,
+                password=pw,
+                session_file=session_file,
+            )
+        else:
+            client = InstagramClient.anonymous()
+    except IGLoginError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    options = IGDownloadOptions(
+        fetch_posts=posts,
+        fetch_reels=reels,
+        fetch_highlights=highlights,
+        fetch_stories=stories,
+        fetch_comments=comments and client.logged_in_as is not None,
+        download_images=download_images,
+        limit=limit,
+    )
+
+    def progress(event: str, payload: dict[str, object]) -> None:
+        if event == "profile_loaded":
+            console.print(
+                f"[cyan]profile[/] @{payload.get('username')}  "
+                f"(private={payload.get('is_private')})"
+            )
+        elif event == "post_saved":
+            console.print(
+                f"  [green]saved[/] {payload.get('kind')} "
+                f"[dim]{payload.get('shortcode')}[/]"
+            )
+        elif event == "highlight_saved":
+            console.print(
+                f"  [green]highlight[/] {payload.get('title')} ({payload.get('items')} items)"
+            )
+        elif event == "story_saved":
+            console.print(f"  [green]story[/] {payload.get('mediaid')}")
+
+    console.print(
+        f"[bold]downloading[/] instagram/@{username} -> {out / 'instagram' / username}"
+    )
+    try:
+        report = await asyncio.to_thread(
+            download_profile,
+            client,
+            username,
+            out_root=out,
+            options=options,
+            on_progress=progress,
+        )
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    profile_root = out / "instagram" / username
+    console.print(
+        f"[bold]done[/] · posts={report.posts} reels={report.reels} "
+        f"highlights={report.highlights} stories={report.stories} "
+        f"images={report.images_downloaded} comments={report.comments_collected}"
+    )
+    if report.errors:
+        console.print(f"[yellow]warnings:[/] {len(report.errors)}")
+        for err in report.errors[:5]:
+            console.print(f"  · {err}")
+
+    if analyze:
+        insights = analyze_comments(profile_root)
+        md_path, _json_path = write_report(insights)
+        console.print(f"[green]comment report[/] -> {md_path}")
+        if insights.top_commenters:
+            tops = ", ".join(f"@{u} ({n})" for u, n in insights.top_commenters[:5])
+            console.print(
+                f"  unique commenters: {insights.unique_commenters} · top: {tops}"
+            )
+
+    if pdf:
+        from gimmethatdata.export.pdf import export_to_pdf
+
+        pdf_path = profile_root / f"{username}.pdf"
+        console.print(f"[cyan]exporting PDF[/] -> {pdf_path}")
+        await export_to_pdf(profile_root, out=pdf_path, title=f"@{username} archive")
+        console.print(
+            f"[green]PDF[/] {pdf_path} ({pdf_path.stat().st_size // 1024} KB)"
+        )
+
+
+@app.command()
 def subdomains(
     seed: Annotated[
         str, typer.Argument(help="Base URL or domain — e.g. https://example.com or example.com")
@@ -947,7 +1155,7 @@ def setup(
 
     extras = ["bypass", "media", "state", "pdf"]
     if full:
-        extras.append("ocr")
+        extras.extend(["ocr", "instagram"])
 
     if not skip_sync:
         console.rule(f"[bold cyan]1/4 · uv sync --extra {' --extra '.join(extras)}[/]")

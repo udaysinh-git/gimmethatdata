@@ -499,6 +499,7 @@ dependencies = [
 all = [
     { name = "aiosqlite" },
     { name = "curl-cffi" },
+    { name = "instaloader" },
     { name = "markdown" },
     { name = "pillow" },
     { name = "playwright" },
@@ -511,6 +512,9 @@ bypass = [
     { name = "curl-cffi" },
     { name = "playwright" },
     { name = "playwright-stealth" },
+]
+instagram = [
+    { name = "instaloader" },
 ]
 media = [
     { name = "pillow" },
@@ -545,8 +549,9 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.4" },
     { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "curl-cffi", marker = "extra == 'bypass'", specifier = ">=0.7" },
-    { name = "gimmethatdata", extras = ["bypass", "media", "state", "ocr", "pdf"], marker = "extra == 'all'" },
+    { name = "gimmethatdata", extras = ["bypass", "media", "state", "ocr", "pdf", "instagram"], marker = "extra == 'all'" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.27" },
+    { name = "instaloader", marker = "extra == 'instagram'", specifier = ">=4.13" },
     { name = "markdown", marker = "extra == 'pdf'", specifier = ">=3.6" },
     { name = "markdownify", specifier = ">=0.13" },
     { name = "pillow", marker = "extra == 'media'", specifier = ">=10.4" },
@@ -567,7 +572,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.12" },
     { name = "yt-dlp", marker = "extra == 'media'", specifier = ">=2024.8.6" },
 ]
-provides-extras = ["bypass", "media", "state", "ocr", "pdf", "all"]
+provides-extras = ["bypass", "media", "state", "ocr", "pdf", "instagram", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -742,6 +747,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503, upload-time = "2025-10-18T21:55:43.219Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484, upload-time = "2025-10-18T21:55:41.639Z" },
+]
+
+[[package]]
+name = "instaloader"
+version = "4.15.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b0/1f/c66c9d5c65bd59cf03632adf112a05aad720b0620f52848d1e5419ef130b/instaloader-4.15.1.tar.gz", hash = "sha256:323ee2015540e627df25535703f246dc39695b71f7f04dadfe67e239dadf3b55", size = 67082, upload-time = "2026-03-21T21:07:42.55Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cc/4a/33099e653b4d9228920a0596a413770b20de978407a0ba0e16319b234931/instaloader-4.15.1-py3-none-any.whl", hash = "sha256:d89544b841d3d2471d6e270568474a0f022daaf392c2836499c51b332bcd530e", size = 69092, upload-time = "2026-03-21T21:07:41.196Z" },
 ]
 
 [[package]]
@@ -1599,6 +1616,21 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/d5/fe/1b3113817447a1d4155e4ac76d2e072f42c0bcba2f43fa8a0e756ea2cd91/regex-2026.5.9-cp314-cp314t-win32.whl", hash = "sha256:3ddd90103f9e5c471c49c7852ecc1fe27c7e45eb99e977aefe7caa4e779f4f58", size = 275746, upload-time = "2026-05-09T23:15:12.609Z" },
     { url = "https://files.pythonhosted.org/packages/92/73/93d42045302636c91f2e5ef588b65b84b01428f28ec77de256b1dfdfbe5c/regex-2026.5.9-cp314-cp314t-win_amd64.whl", hash = "sha256:ca518ed29c46eecba6010b15f1b9a479314d2de409536e71b6a13aa04e3b8a77", size = 285685, upload-time = "2026-05-09T23:15:15.086Z" },
     { url = "https://files.pythonhosted.org/packages/da/80/35b4c33c804a165a7f55289afda3ea9e3eb6d15800341a2d66455c0f1f30/regex-2026.5.9-cp314-cp314t-win_arm64.whl", hash = "sha256:5e41809d2683fcde7d5a8c87a6567ba1fb1ce0de9f31bff578de00a4b2d76daa", size = 275713, upload-time = "2026-05-09T23:15:16.98Z" },
+]
+
+[[package]]
+name = "requests"
+version = "2.34.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi" },
+    { name = "charset-normalizer" },
+    { name = "idna" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/c3/e2a2b89f2d3e2179abd6d00ebd70bff6273f37fb3e0cc209f48b39d00cbf/requests-2.34.2.tar.gz", hash = "sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed", size = 142856, upload-time = "2026-05-14T19:25:27.735Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl", hash = "sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0", size = 73075, upload-time = "2026-05-14T19:25:26.443Z" },
 ]
 
 [[package]]

@@ -105,6 +105,7 @@ uv run playwright install chromium
 | `search <query>` | sqlite-FTS full-text search across every `content.md` under `--out` |
 | `sitemap <domain-dir>` | (re)build `_sitemap.json` + `_sitemap.md` from `_site.sqlite` |
 | `subdomains <url>` | discover subdomains via Certificate Transparency (crt.sh) |
+| `instagram <username>` | archive an IG profile (posts/reels/highlights/comments), with optional auto-PDF + comment insights report |
 | `export-pdf <path>` | single PDF of every `content.md` under `<path>` with embedded images + media badges |
 | `tui` | launch the Textual app (Home / NewJob / Progress / Inspector / Search / Sitemap / Diff / Settings) |
 | `setup` / `doctor` | one-shot install / diagnose without touching anything |

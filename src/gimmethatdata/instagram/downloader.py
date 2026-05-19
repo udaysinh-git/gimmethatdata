@@ -101,7 +101,18 @@ def download_profile(
     try:
         profile = instaloader.Profile.from_username(client.loader.context, username)
     except instaloader.exceptions.ProfileNotExistsException as exc:
+        if client.logged_in_as is None:
+            raise RuntimeError(
+                f"profile lookup failed for @{username}. Instagram now blocks "
+                "anonymous GraphQL access — mint a session file with "
+                "`instaloader --login=<your_user>` and re-run with --session-file."
+            ) from exc
         raise RuntimeError(f"profile not found: {username}") from exc
+    except instaloader.exceptions.ConnectionException as exc:
+        raise RuntimeError(
+            f"instagram refused the request ({exc}). "
+            "Try again with --session-file pointing at a logged-in session."
+        ) from exc
 
     profile_dict = _serialize_profile(profile)
     (target_root / "profile.json").write_text(

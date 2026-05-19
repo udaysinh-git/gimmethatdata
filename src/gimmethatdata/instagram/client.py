@@ -81,14 +81,34 @@ class InstagramClient:
         except instaloader.exceptions.BadCredentialsException as exc:
             raise IGLoginError("bad credentials") from exc
         except instaloader.exceptions.ConnectionException as exc:
-            raise IGLoginError(f"connection / checkpoint error: {exc}") from exc
+            raise IGLoginError(_translate_login_error(str(exc))) from exc
         except Exception as exc:
-            raise IGLoginError(f"login failed: {exc}") from exc
+            raise IGLoginError(_translate_login_error(str(exc))) from exc
         if session_file is not None:
             session_file.parent.mkdir(parents=True, exist_ok=True)
             loader.save_session_to_file(str(session_file))
             _log.info("ig_session_saved", path=str(session_file))
         return cls(loader=loader, logged_in_as=username)
+
+
+def _translate_login_error(raw: str) -> str:
+    """Map instaloader's raw login errors into something actionable."""
+    lower = raw.lower()
+    if "null login result" in lower or "unexpected" in lower or "checkpoint" in lower:
+        return (
+            "Instagram flagged this login as a new/unfamiliar device. "
+            "Open the Instagram app on your phone where this account is signed in, "
+            "accept the 'was this you?' prompt, wait a minute, then either rerun this "
+            "command or mint a session via `uv run instaloader --login=<user>` and pass "
+            "the resulting file via --session-file."
+        )
+    if "challenge" in lower or "suspicious" in lower:
+        return (
+            "Instagram is asking for a checkpoint / suspicious-login challenge. "
+            "Open the app, confirm it was you, then retry. If it persists, use "
+            "`uv run instaloader --login=<user>` once — it handles the challenge flow."
+        )
+    return f"login failed: {raw}"
 
 
 def _make_loader(*, user_agent: str | None) -> instaloader.Instaloader:

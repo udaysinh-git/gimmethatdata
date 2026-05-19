@@ -21,6 +21,10 @@ def test_screens_importable() -> None:
     from gimmethatdata.tui.screens.diff import DiffScreen
     from gimmethatdata.tui.screens.home import HomeScreen
     from gimmethatdata.tui.screens.inspector import InspectorScreen
+    from gimmethatdata.tui.screens.instagram import IGAccountsScreen
+    from gimmethatdata.tui.screens.instagram_compare import IGCompareScreen
+    from gimmethatdata.tui.screens.instagram_discovery import IGDiscoveryScreen
+    from gimmethatdata.tui.screens.instagram_new_job import IGNewJobScreen
     from gimmethatdata.tui.screens.new_job import NewJobScreen
     from gimmethatdata.tui.screens.progress import ProgressScreen
     from gimmethatdata.tui.screens.search import SearchScreen
@@ -36,6 +40,10 @@ def test_screens_importable() -> None:
         SettingsScreen,
         LiveSitemapScreen,
         DiffScreen,
+        IGAccountsScreen,
+        IGNewJobScreen,
+        IGDiscoveryScreen,
+        IGCompareScreen,
     ):
         assert cls is not None
 

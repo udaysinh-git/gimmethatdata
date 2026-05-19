@@ -61,10 +61,18 @@ class DownloadOptions:
     fetch_reels: bool = True
     fetch_highlights: bool = False
     fetch_stories: bool = False
+    fetch_tagged: bool = False
     fetch_comments: bool = True
+    fetch_likers: bool = False
+    fetch_comment_replies: bool = False
+    enrich_locations: bool = False
     download_images: bool = True
     limit: int | None = None
     comments_per_post: int = 100
+    likers_per_post: int = 100
+    since: datetime | None = None  # incremental: skip posts older than this
+    resume: bool = True  # skip shortcodes already on disk
+    ocr_images: bool = False
 
 
 @dataclass
@@ -74,8 +82,11 @@ class DownloadReport:
     reels: int = 0
     highlights: int = 0
     stories: int = 0
+    tagged: int = 0
     images_downloaded: int = 0
     comments_collected: int = 0
+    likers_collected: int = 0
+    skipped_existing: int = 0
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -85,8 +96,11 @@ class DownloadReport:
             "reels": self.reels,
             "highlights": self.highlights,
             "stories": self.stories,
+            "tagged": self.tagged,
             "images_downloaded": self.images_downloaded,
             "comments_collected": self.comments_collected,
+            "likers_collected": self.likers_collected,
+            "skipped_existing": self.skipped_existing,
             "errors": self.errors,
         }
 
@@ -156,6 +170,12 @@ def download_profile(
         else:
             _walk_stories(ig, user, target_root, report=report, options=opts, on_progress=on_progress)
 
+    if opts.fetch_tagged:
+        _walk_tagged(
+            ig, user, target_root,
+            report=report, options=opts, on_progress=on_progress, client=client,
+        )
+
     return report
 
 
@@ -191,15 +211,32 @@ def _walk_posts(
         report.errors.append(f"user_medias: {exc}")
         return
 
+    location_cache: dict[str, dict[str, Any]] = {}
     for index, media in enumerate(medias):
         is_reel = _is_reel(media)
         if is_reel and not options.fetch_reels:
             continue
         if not is_reel and not options.fetch_posts:
             continue
+        if options.since is not None and media.taken_at and media.taken_at < options.since:
+            # Posts come back newest-first; once we hit an older one, we're done.
+            _log.info("ig_since_cutoff_hit", at=str(media.taken_at))
+            break
         kind_dir = reels_dir if is_reel else posts_dir
+        if options.resume and _already_archived(kind_dir / media.code):
+            report.skipped_existing += 1
+            _emit(
+                on_progress,
+                "post_skipped",
+                {"shortcode": media.code, "reason": "already on disk"},
+            )
+            continue
         try:
-            _save_media(ig, media, kind_dir, options=options, client=client, report=report)
+            _save_media(
+                ig, media, kind_dir,
+                options=options, client=client, report=report,
+                location_cache=location_cache,
+            )
         except Exception as exc:
             report.errors.append(f"media {media.code}: {exc}")
             _log.warning("ig_media_failed", shortcode=media.code, error=str(exc))
@@ -215,6 +252,14 @@ def _walk_posts(
         )
 
 
+def _already_archived(post_dir: Path) -> bool:
+    """A shortcode is considered done if it has content.md + a non-empty assets dir."""
+    if not (post_dir / "content.md").exists():
+        return False
+    images_dir = post_dir / "assets" / "images"
+    return images_dir.exists() and any(images_dir.iterdir())
+
+
 def _save_media(
     ig: Any,
     media: Media,
@@ -223,6 +268,7 @@ def _save_media(
     options: DownloadOptions,
     client: InstagramClient,
     report: DownloadReport,
+    location_cache: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     from instagrapi.exceptions import ClientError
 
@@ -243,16 +289,39 @@ def _save_media(
         assets_list = media_refs
 
     metadata = _media_metadata(media)
+    if options.enrich_locations and metadata.get("location"):
+        metadata["location"] = _enrich_location(ig, metadata["location"], cache=location_cache)
+
     comments_payload: list[dict[str, Any]] = []
     if options.fetch_comments and client.logged_in_as is not None:
         try:
             raw_comments = ig.media_comments(media.id, amount=options.comments_per_post)
-            comments_payload = [_serialize_comment(c) for c in raw_comments]
-            report.comments_collected += len(comments_payload)
+            comments_payload = [
+                _serialize_comment(c, ig=ig, fetch_replies=options.fetch_comment_replies)
+                for c in raw_comments
+            ]
+            report.comments_collected += len(comments_payload) + sum(
+                len(c.get("replies") or []) for c in comments_payload
+            )
         except ClientError as exc:
             report.errors.append(f"comments {media.code}: {exc}")
 
-    content_md = _render_media_md(media, metadata=metadata, asset_count=len(assets_list))
+    likers_payload: list[dict[str, Any]] = []
+    if options.fetch_likers and client.logged_in_as is not None:
+        try:
+            likers = ig.media_likers(media.id)
+            likers_payload = [_serialize_user_short(u) for u in (likers or [])]
+            report.likers_collected += len(likers_payload)
+        except ClientError as exc:
+            report.errors.append(f"likers {media.code}: {exc}")
+
+    ocr_text = ""
+    if options.ocr_images:
+        ocr_text = _ocr_assets(post_dir, assets_list)
+
+    content_md = _render_media_md(
+        media, metadata=metadata, asset_count=len(assets_list), ocr_text=ocr_text
+    )
     (post_dir / "content.md").write_text(content_md, encoding="utf-8")
     (post_dir / "metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
@@ -264,6 +333,11 @@ def _save_media(
         json.dumps(comments_payload, indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
     )
+    if likers_payload or options.fetch_likers:
+        (post_dir / "likers.json").write_text(
+            json.dumps(likers_payload, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
 
 
 def _walk_highlights(
@@ -381,6 +455,108 @@ def _walk_stories(
         _emit(on_progress, "story_saved", {"pk": story.pk})
 
 
+def _walk_tagged(
+    ig: Any,
+    user: User,
+    target_root: Path,
+    *,
+    report: DownloadReport,
+    options: DownloadOptions,
+    on_progress: Callable[[str, dict[str, Any]], None] | None,
+    client: InstagramClient,
+) -> None:
+    """Posts where this account was tagged by *others*."""
+    from instagrapi.exceptions import ClientError
+
+    tagged_dir = target_root / "tagged"
+    tagged_dir.mkdir(parents=True, exist_ok=True)
+    amount = options.limit or 0
+    try:
+        medias = ig.usertag_medias(user.pk, amount=amount)
+    except ClientError as exc:
+        report.errors.append(f"usertag_medias: {exc}")
+        return
+    location_cache: dict[str, dict[str, Any]] = {}
+    for media in medias or []:
+        if options.resume and _already_archived(tagged_dir / media.code):
+            report.skipped_existing += 1
+            continue
+        try:
+            _save_media(
+                ig, media, tagged_dir,
+                options=options, client=client, report=report,
+                location_cache=location_cache,
+            )
+        except Exception as exc:
+            report.errors.append(f"tagged {media.code}: {exc}")
+            continue
+        report.tagged += 1
+        _emit(on_progress, "tagged_saved", {"shortcode": media.code})
+
+
+def _enrich_location(
+    ig: Any,
+    location: dict[str, Any],
+    *,
+    cache: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Fetch the canonical location record (lat/lng/address) given a pk."""
+    pk = str(location.get("pk") or "")
+    if not pk:
+        return location
+    if cache is not None and pk in cache:
+        return {**location, **cache[pk]}
+    try:
+        full = ig.location_info(int(pk))
+    except Exception as exc:
+        _log.debug("ig_location_enrich_failed", pk=pk, error=str(exc))
+        return location
+    enriched = {
+        "pk": pk,
+        "name": getattr(full, "name", location.get("name")),
+        "lat": getattr(full, "lat", None),
+        "lng": getattr(full, "lng", None),
+        "address": getattr(full, "address", None),
+        "city": getattr(full, "city", None),
+    }
+    if cache is not None:
+        cache[pk] = enriched
+    return enriched
+
+
+def _serialize_user_short(user: object) -> dict[str, Any]:
+    return {
+        "pk": str(getattr(user, "pk", "")),
+        "username": getattr(user, "username", "?"),
+        "full_name": getattr(user, "full_name", None),
+        "is_verified": getattr(user, "is_verified", False),
+    }
+
+
+def _ocr_assets(post_dir: Path, assets_list: list[dict[str, Any]]) -> str:
+    """Run OCR over every downloaded image, return aggregated text."""
+    try:
+        from gimmethatdata.parse.ocr import _ocr_image_bytes
+    except ImportError:
+        return ""
+    chunks: list[str] = []
+    for asset in assets_list:
+        local = asset.get("local_path")
+        if not local:
+            continue
+        path = post_dir / local
+        if not path.exists():
+            continue
+        try:
+            body = path.read_bytes()
+        except OSError:
+            continue
+        text = _ocr_image_bytes(body)
+        if text and len(text.strip()) >= 8:
+            chunks.append(text.strip())
+    return "\n\n---\n\n".join(chunks)
+
+
 def _is_reel(media: Media) -> bool:
     """media_type 2 + product_type 'clips' or 'feed_video' → reel/video."""
     product_type = getattr(media, "product_type", "") or ""
@@ -432,13 +608,88 @@ def _media_metadata(media: Media) -> dict[str, Any]:
         "likes": getattr(media, "like_count", 0),
         "comments_count": getattr(media, "comment_count", 0),
         "video_view_count": getattr(media, "view_count", None) or getattr(media, "play_count", None),
-        "location": {"pk": location.pk, "name": location.name} if location else None,
+        "play_count": getattr(media, "play_count", None),
+        "share_count": getattr(media, "share_count", None),
+        "save_count": getattr(media, "save_count", None),
+        "has_audio": getattr(media, "has_audio", None),
+        "audio_info": _audio_info(media),
+        "location": _location_dict(location),
+        "tagged_users": _tagged_users(media),
         "hashtags": sorted({h.lower() for h in re.findall(r"(?<![\w])#([A-Za-z0-9_]+)", caption)}),
         "mentions": sorted({m.lower() for m in re.findall(r"(?<![\w])@([A-Za-z0-9._]+)", caption)}),
     }
 
 
-def _serialize_comment(comment: object) -> dict[str, Any]:
+def _audio_info(media: Media) -> dict[str, Any] | None:
+    """Pull the reel/clips audio metadata if present."""
+    clips_meta = getattr(media, "clips_metadata", None)
+    if not clips_meta:
+        return None
+    music_info = getattr(clips_meta, "music_info", None) or getattr(
+        clips_meta, "original_sound_info", None
+    )
+    if not music_info:
+        return None
+    asset = getattr(music_info, "music_asset_info", None) or music_info
+    return {
+        "title": getattr(asset, "title", None) or getattr(music_info, "title", None),
+        "artist": (
+            getattr(asset, "display_artist", None)
+            or getattr(asset, "ig_artist", None)
+            or getattr(asset, "artist", None)
+        ),
+        "audio_id": str(
+            getattr(asset, "id", None)
+            or getattr(asset, "audio_id", None)
+            or getattr(music_info, "audio_id", "")
+        ),
+        "is_original": bool(getattr(music_info, "original_sound_info", None)),
+        "duration_ms": getattr(asset, "duration_in_ms", None),
+    }
+
+
+def _location_dict(location: object) -> dict[str, Any] | None:
+    if not location:
+        return None
+    return {
+        "pk": str(getattr(location, "pk", "")),
+        "name": getattr(location, "name", None),
+        "lat": getattr(location, "lat", None),
+        "lng": getattr(location, "lng", None),
+        "address": getattr(location, "address", None),
+        "city": getattr(location, "city", None),
+    }
+
+
+def _tagged_users(media: Media) -> list[dict[str, Any]]:
+    tags = getattr(media, "usertags", None) or []
+    out: list[dict[str, Any]] = []
+    for tag in tags:
+        user = getattr(tag, "user", None) or tag
+        username = getattr(user, "username", None)
+        if not username:
+            continue
+        out.append(
+            {
+                "username": username,
+                "full_name": getattr(user, "full_name", None),
+                "x": getattr(tag, "x", None),
+                "y": getattr(tag, "y", None),
+            }
+        )
+    return out
+
+
+def _serialize_comment(
+    comment: object,
+    *,
+    ig: Any = None,
+    fetch_replies: bool = False,
+) -> dict[str, Any]:
+    replies: list[dict[str, Any]] = []
+    child_count = int(getattr(comment, "child_comment_count", 0) or 0)
+    if fetch_replies and child_count > 0 and ig is not None:
+        replies = _fetch_comment_replies(ig, comment)
     return {
         "pk": str(getattr(comment, "pk", "")),
         "owner": getattr(getattr(comment, "user", None), "username", "?"),
@@ -448,17 +699,56 @@ def _serialize_comment(comment: object) -> dict[str, Any]:
             getattr(comment, "created_at_utc", None)
             or getattr(comment, "created_at", None)
         ),
-        "replies": [],  # instagrapi exposes media_comments_chunk for nested; left empty here
+        "child_comment_count": child_count,
+        "replies": replies,
     }
 
 
-def _render_media_md(media: Media, *, metadata: dict[str, Any], asset_count: int) -> str:
+def _fetch_comment_replies(ig: Any, parent: object) -> list[dict[str, Any]]:
+    """Best-effort: try instagrapi's reply endpoint, fall back to empty."""
+    parent_pk = getattr(parent, "pk", None)
+    media_id = getattr(parent, "media_id", None) or getattr(parent, "media", None)
+    if parent_pk is None or media_id is None:
+        return []
+    fetcher = getattr(ig, "media_comment_replies", None) or getattr(
+        ig, "comment_replies", None
+    )
+    if fetcher is None:
+        return []
+    try:
+        raw = fetcher(media_id, parent_pk) if media_id is not None else fetcher(parent_pk)
+    except Exception as exc:
+        _log.debug("ig_replies_failed", parent_pk=str(parent_pk), error=str(exc))
+        return []
+    return [
+        {
+            "pk": str(getattr(r, "pk", "")),
+            "owner": getattr(getattr(r, "user", None), "username", "?"),
+            "text": getattr(r, "text", ""),
+            "likes": getattr(r, "like_count", 0),
+            "created_at": getattr(r, "created_at_utc", None),
+        }
+        for r in (raw or [])
+    ]
+
+
+def _render_media_md(
+    media: Media,
+    *,
+    metadata: dict[str, Any],
+    asset_count: int,
+    ocr_text: str = "",
+) -> str:
     caption = (getattr(media, "caption_text", "") or "").strip()
     title = caption.splitlines()[0][:80] if caption else media.code
     owner = getattr(media.user, "username", "?")
     taken = media.taken_at.isoformat() if media.taken_at else "?"
     likes = metadata.get("likes", 0)
     comments = metadata.get("comments_count", 0)
+    plays = metadata.get("play_count") or metadata.get("video_view_count")
+    shares = metadata.get("share_count")
+    saves = metadata.get("save_count")
+
     lines = [
         "---",
         f'url: "https://www.instagram.com/p/{media.code}/"',
@@ -471,15 +761,39 @@ def _render_media_md(media: Media, *, metadata: dict[str, Any], asset_count: int
         f"comments_count: {comments}",
         f"is_video: {str(media.media_type == 2).lower()}",
         f"images: {asset_count}",
-        "---",
-        "",
-        f"# {title}",
-        "",
-        f"_posted by **@{owner}** on {taken}_",
-        "",
-        f"❤ {likes}  ·  💬 {comments}",
-        "",
     ]
+    if plays:
+        lines.append(f"plays: {plays}")
+    if shares:
+        lines.append(f"shares: {shares}")
+    if saves:
+        lines.append(f"saves: {saves}")
+    audio = metadata.get("audio_info")
+    if audio and audio.get("title"):
+        lines.append(f'audio_title: "{_yaml_escape(audio["title"])}"')
+        if audio.get("artist"):
+            lines.append(f'audio_artist: "{_yaml_escape(audio["artist"])}"')
+    lines.extend(
+        [
+            "---",
+            "",
+            f"# {title}",
+            "",
+            f"_posted by **@{owner}** on {taken}_",
+            "",
+        ]
+    )
+
+    badges = [f"❤ {likes}", f"💬 {comments}"]
+    if plays:
+        badges.append(f"▶ {plays:,}")
+    if shares:
+        badges.append(f"↗ {shares}")
+    if saves:
+        badges.append(f"🔖 {saves}")
+    lines.append("  ·  ".join(badges))
+    lines.append("")
+
     if caption:
         lines.append(caption)
         lines.append("")
@@ -489,9 +803,29 @@ def _render_media_md(media: Media, *, metadata: dict[str, Any], asset_count: int
     if metadata.get("mentions"):
         lines.append("**Mentions:** " + " ".join(f"@{m}" for m in metadata["mentions"]))
         lines.append("")
+    if metadata.get("tagged_users"):
+        names = " ".join(f"@{t['username']}" for t in metadata["tagged_users"])
+        lines.append(f"**Tagged in photo:** {names}")
+        lines.append("")
     location = metadata.get("location")
     if location and location.get("name"):
-        lines.append(f"**Location:** {location['name']}")
+        loc_line = f"**Location:** {location['name']}"
+        if location.get("lat") and location.get("lng"):
+            loc_line += f" ([{location['lat']:.4f}, {location['lng']:.4f}](https://www.google.com/maps?q={location['lat']},{location['lng']}))"
+        lines.append(loc_line)
+        lines.append("")
+    if audio and audio.get("title"):
+        audio_line = f"**Audio:** {audio['title']}"
+        if audio.get("artist"):
+            audio_line += f" — _{audio['artist']}_"
+        if audio.get("is_original"):
+            audio_line += " · _original sound_"
+        lines.append(audio_line)
+        lines.append("")
+    if ocr_text:
+        lines.append("## OCR")
+        lines.append("")
+        lines.append(ocr_text)
         lines.append("")
     return "\n".join(lines) + "\n"
 

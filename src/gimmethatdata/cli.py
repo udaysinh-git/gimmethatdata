@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
@@ -12,6 +13,9 @@ from rich.console import Console
 from gimmethatdata import __version__
 from gimmethatdata.core.models import AssetKind
 from gimmethatdata.logging_setup import configure_logging
+
+if TYPE_CHECKING:
+    from gimmethatdata.instagram import InstagramClient
 
 app = typer.Typer(
     name="gimmethatdata",
@@ -808,6 +812,174 @@ async def _run_watch(
     )
 
 
+@app.command(name="ig-hashtag")
+def ig_hashtag(
+    tag: Annotated[str, typer.Argument(help="Hashtag without the leading #.")],
+    out: Annotated[Path, typer.Option("--out", "-o")] = Path("out"),
+    sort: Annotated[str, typer.Option("--sort", help="top | recent")] = "top",
+    amount: Annotated[int, typer.Option("--amount", help="Max posts.")] = 50,
+    session_file: Annotated[
+        Path | None,
+        typer.Option("--session-file", help="Session file (login almost always needed)."),
+    ] = None,
+    login_user: Annotated[str | None, typer.Option("--login")] = None,
+    password: Annotated[str | None, typer.Option("--password")] = None,
+) -> None:
+    """Archive top/recent posts for a hashtag."""
+    from gimmethatdata.instagram.discovery import discover_hashtag
+
+    if sort not in {"top", "recent"}:
+        raise typer.BadParameter("--sort must be 'top' or 'recent'")
+    client = _ig_client_from_flags(
+        login_user=login_user, password=password, session_file=session_file
+    )
+    report = discover_hashtag(
+        client, tag, out_root=out, sort=sort, amount=amount,
+        on_progress=lambda e, p: console.print(f"  [green]saved[/] [dim]{p.get('shortcode')}[/]")
+        if e == "discovery_saved" else None,
+    )
+    console.print(
+        f"[bold]hashtag #{tag}[/] saved={report.saved} skipped={report.skipped_existing} "
+        f"images={report.images_downloaded} -> {report.target_dir}"
+    )
+    for err in report.errors[:5]:
+        console.print(f"  [yellow]·[/] {err}")
+
+
+@app.command(name="ig-location")
+def ig_location(
+    location_pk: Annotated[int, typer.Argument(help="Numeric Instagram location id.")],
+    out: Annotated[Path, typer.Option("--out", "-o")] = Path("out"),
+    sort: Annotated[str, typer.Option("--sort", help="top | recent")] = "top",
+    amount: Annotated[int, typer.Option("--amount")] = 50,
+    session_file: Annotated[Path | None, typer.Option("--session-file")] = None,
+    login_user: Annotated[str | None, typer.Option("--login")] = None,
+    password: Annotated[str | None, typer.Option("--password")] = None,
+) -> None:
+    """Archive posts for an Instagram location PK."""
+    from gimmethatdata.instagram.discovery import discover_location
+
+    if sort not in {"top", "recent"}:
+        raise typer.BadParameter("--sort must be 'top' or 'recent'")
+    client = _ig_client_from_flags(
+        login_user=login_user, password=password, session_file=session_file
+    )
+    report = discover_location(
+        client, location_pk, out_root=out, sort=sort, amount=amount,
+        on_progress=lambda e, p: console.print(f"  [green]saved[/] [dim]{p.get('shortcode')}[/]")
+        if e == "discovery_saved" else None,
+    )
+    console.print(
+        f"[bold]location {location_pk}[/] saved={report.saved} "
+        f"skipped={report.skipped_existing} -> {report.target_dir}"
+    )
+
+
+@app.command(name="ig-music")
+def ig_music(
+    track_id: Annotated[int, typer.Argument(help="Numeric IG audio/track id.")],
+    out: Annotated[Path, typer.Option("--out", "-o")] = Path("out"),
+    amount: Annotated[int, typer.Option("--amount")] = 50,
+    session_file: Annotated[Path | None, typer.Option("--session-file")] = None,
+    login_user: Annotated[str | None, typer.Option("--login")] = None,
+    password: Annotated[str | None, typer.Option("--password")] = None,
+) -> None:
+    """Archive posts that use a given music/audio track."""
+    from gimmethatdata.instagram.discovery import discover_music
+
+    client = _ig_client_from_flags(
+        login_user=login_user, password=password, session_file=session_file
+    )
+    report = discover_music(
+        client, track_id, out_root=out, amount=amount,
+        on_progress=lambda e, p: console.print(f"  [green]saved[/] [dim]{p.get('shortcode')}[/]")
+        if e == "discovery_saved" else None,
+    )
+    console.print(
+        f"[bold]music {track_id}[/] saved={report.saved} "
+        f"skipped={report.skipped_existing} -> {report.target_dir}"
+    )
+    for err in report.errors[:5]:
+        console.print(f"  [yellow]·[/] {err}")
+
+
+@app.command(name="ig-compare")
+def ig_compare(
+    left: Annotated[Path, typer.Argument(help="First profile dir (e.g. out/instagram/a).")],
+    right: Annotated[Path, typer.Argument(help="Second profile dir.")],
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Write report into this dir (default: alongside profiles)."),
+    ] = None,
+) -> None:
+    """Compare two scraped IG profiles — metric deltas + commenter overlap."""
+    from gimmethatdata.instagram import compare_profiles, write_compare_report
+
+    report = compare_profiles(left, right)
+    md_path, json_path = write_compare_report(report, out_dir=out)
+    console.print(f"[green]wrote[/] {md_path}")
+    console.print(f"[green]wrote[/] {json_path}")
+    console.print(
+        f"Audience overlap: {len(report.shared_commenters)} shared "
+        f"(jaccard {report.jaccard_commenters:.3f})"
+    )
+
+
+@app.command(name="ig-engagement")
+def ig_engagement(
+    profile_dir: Annotated[Path, typer.Argument(help="Path to out/instagram/<user>.")],
+) -> None:
+    """(Re)build the engagement insights report for a downloaded profile."""
+    from gimmethatdata.instagram import analyze_engagement, write_engagement_report
+
+    if not profile_dir.exists():
+        raise typer.BadParameter(f"path does not exist: {profile_dir}")
+    report = analyze_engagement(profile_dir)
+    md_path, json_path = write_engagement_report(report)
+    console.print(f"[green]wrote[/] {md_path}")
+    console.print(f"[green]wrote[/] {json_path}")
+
+
+@app.command(name="ig-contact-sheet")
+def ig_contact_sheet(
+    profile_dir: Annotated[Path, typer.Argument(help="Path to out/instagram/<user>.")],
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Output HTML path (default: <profile>/_contact_sheet.html)."),
+    ] = None,
+) -> None:
+    """Render every downloaded image into one browsable HTML grid."""
+    from gimmethatdata.instagram import write_contact_sheet
+
+    if not profile_dir.exists():
+        raise typer.BadParameter(f"path does not exist: {profile_dir}")
+    path = write_contact_sheet(profile_dir, out=out)
+    console.print(f"[green]wrote[/] {path}")
+
+
+def _ig_client_from_flags(
+    *, login_user: str | None, password: str | None, session_file: Path | None
+) -> InstagramClient:
+    from gimmethatdata.instagram import IGLoginError, InstagramClient
+
+    try:
+        if session_file is not None and session_file.exists():
+            return InstagramClient.from_session_file(
+                username=login_user or "anonymous",
+                session_file=session_file,
+            )
+        if login_user is not None:
+            pw = password if password is not None else typer.prompt(
+                "password", hide_input=True
+            )
+            return InstagramClient.login(
+                username=login_user, password=pw, session_file=session_file,
+            )
+        return InstagramClient.anonymous()
+    except IGLoginError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
 @app.command(name="ig-import-cookie")
 def ig_import_cookie(
     username: Annotated[
@@ -857,7 +1029,19 @@ def ig_import_cookie(
 
 @app.command()
 def instagram(
-    username: Annotated[str, typer.Argument(help="Instagram handle (no @).")],
+    username: Annotated[
+        str,
+        typer.Argument(
+            help="Instagram handle (no @). Or comma-separated list: a,b,c.",
+        ),
+    ],
+    users_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--users-file",
+            help="Read handles from a file (one per line, # comments allowed).",
+        ),
+    ] = None,
     out: Annotated[
         Path,
         typer.Option("--out", "-o", help="Output root."),
@@ -915,6 +1099,54 @@ def instagram(
         bool,
         typer.Option("--pdf", help="Auto-export the downloaded profile to PDF after."),
     ] = False,
+    tagged: Annotated[
+        bool,
+        typer.Option("--tagged", help="Also archive posts where the user was tagged by others."),
+    ] = False,
+    likers: Annotated[
+        bool,
+        typer.Option("--likers", help="Save the list of users who liked each post (login required)."),
+    ] = False,
+    replies: Annotated[
+        bool,
+        typer.Option(
+            "--comment-replies",
+            help="Fetch nested comment replies (slower; one API call per comment with children).",
+        ),
+    ] = False,
+    enrich_locations: Annotated[
+        bool,
+        typer.Option(
+            "--enrich-locations",
+            help="Resolve location names to lat/lng/address (one extra API call per unique loc).",
+        ),
+    ] = False,
+    ocr_images: Annotated[
+        bool,
+        typer.Option("--ocr-images", help="Run OCR over downloaded photos and append to content.md."),
+    ] = False,
+    since: Annotated[
+        str | None,
+        typer.Option(
+            "--since",
+            help="Only fetch posts on/after this date (YYYY-MM-DD). Incremental archive.",
+        ),
+    ] = None,
+    no_resume: Annotated[
+        bool,
+        typer.Option("--no-resume", help="Re-download even if a shortcode is already on disk."),
+    ] = False,
+    analytics: Annotated[
+        bool,
+        typer.Option(
+            "--analytics/--no-analytics",
+            help="After download, build the engagement insights report.",
+        ),
+    ] = True,
+    contact_sheet: Annotated[
+        bool,
+        typer.Option("--contact-sheet", help="Generate `_contact_sheet.html` after download."),
+    ] = False,
 ) -> None:
     """Archive an Instagram profile (posts / reels / highlights / comments).
 
@@ -926,14 +1158,21 @@ def instagram(
     """
     if password is not None and login_user is None:
         raise typer.BadParameter("--password requires --login")
-    if (highlights or stories or comments) and not (login_user or session_file):
+    if (highlights or stories or comments or likers or tagged) and not (login_user or session_file):
         console.print(
-            "[yellow]note:[/] highlights / stories / comments need login. "
-            "Pass --login <user> or --session-file <path> to enable them."
+            "[yellow]note:[/] highlights / stories / comments / likers / tagged "
+            "need login. Pass --login <user> or --session-file <path>."
         )
+    handles = _collect_ig_handles(username, users_file)
+    since_dt: datetime | None = None
+    if since is not None:
+        try:
+            since_dt = datetime.fromisoformat(since).replace(tzinfo=UTC)
+        except ValueError as exc:
+            raise typer.BadParameter(f"--since must be YYYY-MM-DD: {exc}") from exc
     asyncio.run(
         _run_instagram(
-            username=username,
+            handles=handles,
             out=out,
             login_user=login_user,
             password=password,
@@ -943,18 +1182,50 @@ def instagram(
             reels=reels,
             highlights=highlights,
             stories=stories,
+            tagged=tagged,
             comments=comments,
+            likers=likers,
+            replies=replies,
+            enrich_locations=enrich_locations,
+            ocr_images=ocr_images,
+            since_dt=since_dt,
+            resume=not no_resume,
             analyze=analyze,
+            analytics=analytics,
             download_images=download_images,
             limit=limit,
             pdf=pdf,
+            contact_sheet=contact_sheet,
         )
     )
 
 
+def _collect_ig_handles(username: str, users_file: Path | None) -> list[str]:
+    handles: list[str] = []
+    for raw in username.split(","):
+        handle = raw.strip().lstrip("@")
+        if handle:
+            handles.append(handle)
+    if users_file is not None:
+        for line in users_file.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            handles.append(stripped.lstrip("@"))
+    seen: set[str] = set()
+    unique: list[str] = []
+    for h in handles:
+        if h not in seen:
+            seen.add(h)
+            unique.append(h)
+    if not unique:
+        raise typer.BadParameter("no Instagram handles supplied")
+    return unique
+
+
 async def _run_instagram(
     *,
-    username: str,
+    handles: list[str],
     out: Path,
     login_user: str | None,
     password: str | None,
@@ -964,17 +1235,29 @@ async def _run_instagram(
     reels: bool,
     highlights: bool,
     stories: bool,
+    tagged: bool,
     comments: bool,
+    likers: bool,
+    replies: bool,
+    enrich_locations: bool,
+    ocr_images: bool,
+    since_dt: datetime | None,
+    resume: bool,
     analyze: bool,
+    analytics: bool,
     download_images: bool,
     limit: int | None,
     pdf: bool,
+    contact_sheet: bool,
 ) -> None:
     from gimmethatdata.instagram import (
         IGDownloadOptions,
         IGLoginError,
         InstagramClient,
+        analyze_engagement,
         download_profile,
+        write_contact_sheet,
+        write_engagement_report,
     )
     from gimmethatdata.instagram.comments import analyze as analyze_comments
     from gimmethatdata.instagram.comments import write_report
@@ -982,7 +1265,7 @@ async def _run_instagram(
     try:
         if session_file is not None and session_file.exists():
             client = InstagramClient.from_session_file(
-                username=login_user or username,
+                username=login_user or handles[0],
                 session_file=session_file,
             )
         elif login_user is not None:
@@ -998,14 +1281,21 @@ async def _run_instagram(
     except IGLoginError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
-    options = IGDownloadOptions(
+    base_options = IGDownloadOptions(
         fetch_posts=posts,
         fetch_reels=reels,
         fetch_highlights=highlights,
         fetch_stories=stories,
+        fetch_tagged=tagged,
         fetch_comments=comments and client.logged_in_as is not None,
+        fetch_likers=likers and client.logged_in_as is not None,
+        fetch_comment_replies=replies,
+        enrich_locations=enrich_locations,
+        ocr_images=ocr_images,
         download_images=download_images,
         limit=limit,
+        since=since_dt,
+        resume=resume,
     )
 
     def progress(event: str, payload: dict[str, object]) -> None:
@@ -1019,6 +1309,12 @@ async def _run_instagram(
                 f"  [green]saved[/] {payload.get('kind')} "
                 f"[dim]{payload.get('shortcode')}[/]"
             )
+        elif event == "post_skipped":
+            console.print(
+                f"  [dim]skip[/] {payload.get('shortcode')} ({payload.get('reason')})"
+            )
+        elif event == "tagged_saved":
+            console.print(f"  [green]tagged[/] [dim]{payload.get('shortcode')}[/]")
         elif event == "highlight_saved":
             console.print(
                 f"  [green]highlight[/] {payload.get('title')} ({payload.get('items')} items)"
@@ -1026,51 +1322,72 @@ async def _run_instagram(
         elif event == "story_saved":
             console.print(f"  [green]story[/] {payload.get('mediaid')}")
 
-    console.print(
-        f"[bold]downloading[/] instagram/@{username} -> {out / 'instagram' / username}"
-    )
-    try:
-        report = await asyncio.to_thread(
-            download_profile,
-            client,
-            username,
-            out_root=out,
-            options=options,
-            on_progress=progress,
-        )
-    except RuntimeError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-    profile_root = out / "instagram" / username
-    console.print(
-        f"[bold]done[/] · posts={report.posts} reels={report.reels} "
-        f"highlights={report.highlights} stories={report.stories} "
-        f"images={report.images_downloaded} comments={report.comments_collected}"
-    )
-    if report.errors:
-        console.print(f"[yellow]warnings:[/] {len(report.errors)}")
-        for err in report.errors[:5]:
-            console.print(f"  · {err}")
-
-    if analyze:
-        insights = analyze_comments(profile_root)
-        md_path, _json_path = write_report(insights)
-        console.print(f"[green]comment report[/] -> {md_path}")
-        if insights.top_commenters:
-            tops = ", ".join(f"@{u} ({n})" for u, n in insights.top_commenters[:5])
-            console.print(
-                f"  unique commenters: {insights.unique_commenters} · top: {tops}"
-            )
-
-    if pdf:
-        from gimmethatdata.export.pdf import export_to_pdf
-
-        pdf_path = profile_root / f"{username}.pdf"
-        console.print(f"[cyan]exporting PDF[/] -> {pdf_path}")
-        await export_to_pdf(profile_root, out=pdf_path, title=f"@{username} archive")
+    for handle in handles:
         console.print(
-            f"[green]PDF[/] {pdf_path} ({pdf_path.stat().st_size // 1024} KB)"
+            f"[bold]downloading[/] instagram/@{handle} -> {out / 'instagram' / handle}"
         )
+        try:
+            report = await asyncio.to_thread(
+                download_profile,
+                client,
+                handle,
+                out_root=out,
+                options=base_options,
+                on_progress=progress,
+            )
+        except RuntimeError as exc:
+            console.print(f"[red]{handle}:[/] {exc}")
+            continue
+
+        profile_root = out / "instagram" / handle
+        console.print(
+            f"[bold]done @{handle}[/] · posts={report.posts} reels={report.reels} "
+            f"tagged={report.tagged} highlights={report.highlights} "
+            f"stories={report.stories} images={report.images_downloaded} "
+            f"comments={report.comments_collected} likers={report.likers_collected} "
+            f"skipped={report.skipped_existing}"
+        )
+        if report.errors:
+            console.print(f"[yellow]warnings:[/] {len(report.errors)}")
+            for err in report.errors[:5]:
+                console.print(f"  · {err}")
+
+        if analyze:
+            insights = analyze_comments(profile_root)
+            md_path, _json_path = write_report(insights)
+            console.print(f"[green]comment report[/] -> {md_path}")
+            if insights.top_commenters:
+                tops = ", ".join(f"@{u} ({n})" for u, n in insights.top_commenters[:5])
+                console.print(
+                    f"  unique commenters: {insights.unique_commenters} · top: {tops}"
+                )
+
+        if analytics:
+            engagement = analyze_engagement(profile_root)
+            md_path, _json_path = write_engagement_report(engagement)
+            console.print(f"[green]engagement report[/] -> {md_path}")
+            best = engagement.best_by(metric="engagement", top=3)
+            if best:
+                console.print(
+                    "  top engagement: "
+                    + " · ".join(
+                        f"{p.shortcode}({p.likes}❤ {p.comments}💬)" for p in best
+                    )
+                )
+
+        if contact_sheet:
+            sheet_path = write_contact_sheet(profile_root)
+            console.print(f"[green]contact sheet[/] -> {sheet_path}")
+
+        if pdf:
+            from gimmethatdata.export.pdf import export_to_pdf
+
+            pdf_path = profile_root / f"{handle}.pdf"
+            console.print(f"[cyan]exporting PDF[/] -> {pdf_path}")
+            await export_to_pdf(profile_root, out=pdf_path, title=f"@{handle} archive")
+            console.print(
+                f"[green]PDF[/] {pdf_path} ({pdf_path.stat().st_size // 1024} KB)"
+            )
 
 
 @app.command()

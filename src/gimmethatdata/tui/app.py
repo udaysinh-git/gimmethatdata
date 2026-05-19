@@ -38,6 +38,7 @@ class GimmeApp(App[None]):
         Binding("s", "open_search", "Search"),
         Binding("m", "open_sitemap", "Sitemap"),
         Binding("d", "open_diff", "Diff"),
+        Binding("i", "open_instagram", "Instagram"),
         Binding("comma", "open_settings", "Settings"),
         Binding("question_mark", "help", "Help"),
     ]
@@ -82,9 +83,14 @@ class GimmeApp(App[None]):
 
         self.push_screen(SettingsScreen())
 
+    def action_open_instagram(self) -> None:
+        from gimmethatdata.tui.screens.instagram import IGAccountsScreen
+
+        self.push_screen(IGAccountsScreen(out_root=self.out_root))
+
     def action_help(self) -> None:
         self.notify(
-            "n: new · s: search · m: sitemap · d: diff · ,: settings · q: quit",
+            "n: new · s: search · m: sitemap · d: diff · i: instagram · ,: settings · q: quit",
             title="Help",
         )
 

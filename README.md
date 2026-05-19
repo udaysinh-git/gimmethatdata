@@ -209,6 +209,19 @@ Or skip thinking about it and run `gimmethatdata setup` — that handles extras,
 
 ---
 
+## Roadmap / what's next
+
+Loose plans, no dates. Nudge via issues if you want one to jump the queue.
+
+- **X (Twitter) archiver** — same shape as the Instagram one: profile + posts + media + replies + engagement insights. X's web surface is a moving target, so expect a session-file flow like IG.
+- **Universal media sniffer / downloader** — point it at *any* page with a video or audio embed (X, TikTok, Vimeo, Bluesky, Mastodon, random CDN players) and walk away with the file + thumbnail + surrounding post metadata. yt-dlp covers a lot today; the goal is one wrapped CLI that also captures the post around the media, not just the stream.
+- **Per-platform feature parity** — every new platform lands with the *full* IG-style kit on day one: archiver + discovery + analytics + compare + contact sheet. No half-baked stubs.
+- **Next platforms on the list** — X, TikTok, YouTube (channel-level), Bluesky, Mastodon. Order TBD by demand.
+- **Plugin SDK** — `entry_points = "gimmethatdata.extractors"` already powers the built-in Reddit extractor. The plan is to document it properly so community plugins can ship without forking.
+- **Daemon / scheduler mode** — `watch` exists for single jobs; next step is a long-running scheduler driving many watches + periodic IG re-archives + diff alerts on a cron.
+
+---
+
 ## License
 
 See [LICENSE](./LICENSE).

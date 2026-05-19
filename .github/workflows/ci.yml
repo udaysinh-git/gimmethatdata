@@ -30,8 +30,8 @@ jobs:
       - name: Pin Python
         run: uv python pin ${{ matrix.python-version }}
 
-      - name: Sync dev + bypass + media + state
-        run: uv sync --extra bypass --extra media --extra state
+      - name: Sync dev + runtime extras
+        run: uv sync --extra bypass --extra media --extra state --extra pdf --extra instagram
 
       - name: Ruff
         run: uv run ruff check .

@@ -19,6 +19,10 @@ Layout:
       assets/images/<sha>.jpg          # cover frame
     highlights/<title>/<id>/
       content.md, assets.json, assets/images/<sha>.jpg
+    stories/<id>/
+      content.md, assets.json, assets/images/<sha>.jpg
+
+Backend: instagrapi (Instagram's mobile private API).
 """
 
 from __future__ import annotations
@@ -31,13 +35,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
-import instaloader
 
 from gimmethatdata.instagram.client import InstagramClient
 from gimmethatdata.logging_setup import get_logger
+
+if TYPE_CHECKING:
+    from instagrapi.types import Media, User
 
 _log = get_logger(__name__)
 
@@ -58,7 +64,7 @@ class DownloadOptions:
     fetch_comments: bool = True
     download_images: bool = True
     limit: int | None = None
-    concurrency: int = 4
+    comments_per_post: int = 100
 
 
 @dataclass
@@ -94,97 +100,110 @@ def download_profile(
     on_progress: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> DownloadReport:
     """Download a public/accessible profile end-to-end, returning a report."""
+    from instagrapi.exceptions import (
+        ClientError,
+        UserNotFound,
+    )
+
     opts = options or DownloadOptions()
     target_root = out_root / "instagram" / username
     target_root.mkdir(parents=True, exist_ok=True)
+    ig = client.client  # instagrapi.Client
 
     try:
-        profile = instaloader.Profile.from_username(client.loader.context, username)
-    except instaloader.exceptions.ProfileNotExistsException as exc:
-        if client.logged_in_as is None:
-            raise RuntimeError(
-                f"profile lookup failed for @{username}. Instagram now blocks "
-                "anonymous GraphQL access — mint a session file with "
-                "`instaloader --login=<your_user>` and re-run with --session-file."
-            ) from exc
+        user = ig.user_info_by_username(username)
+    except UserNotFound as exc:
         raise RuntimeError(f"profile not found: {username}") from exc
-    except instaloader.exceptions.ConnectionException as exc:
+    except ClientError as exc:
         raise RuntimeError(
-            f"instagram refused the request ({exc}). "
-            "Try again with --session-file pointing at a logged-in session."
+            f"profile lookup failed for @{username}: {exc}. "
+            "If this persists, mint a fresh session via `ig-import-cookie`."
         ) from exc
 
-    profile_dict = _serialize_profile(profile)
+    profile_dict = _serialize_user(user)
     (target_root / "profile.json").write_text(
         json.dumps(profile_dict, indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
     )
 
     report = DownloadReport(profile=profile_dict)
-    _emit(on_progress, "profile_loaded", {"username": username, "is_private": profile.is_private})
+    _emit(on_progress, "profile_loaded", {"username": username, "is_private": user.is_private})
 
-    if profile.is_private and client.logged_in_as is None:
+    if user.is_private and client.logged_in_as is None:
         report.errors.append("profile is private and client is anonymous")
+        return report
+    if user.is_private and not _follows(ig, user):
+        report.errors.append(
+            f"profile is private and @{client.logged_in_as} doesn't follow @{username}"
+        )
         return report
 
     if opts.fetch_posts or opts.fetch_reels:
-        count = _walk_posts(
-            client, profile, target_root, report=report, options=opts, on_progress=on_progress,
+        _walk_posts(
+            ig, user, target_root,
+            report=report, options=opts, on_progress=on_progress, client=client,
         )
-        _emit(on_progress, "posts_done", {"count": count})
 
     if opts.fetch_highlights:
         if client.logged_in_as is None:
             report.errors.append("highlights require login; skipping")
         else:
-            _walk_highlights(
-                client, profile, target_root, report=report, options=opts, on_progress=on_progress,
-            )
+            _walk_highlights(ig, user, target_root, report=report, options=opts, on_progress=on_progress)
 
     if opts.fetch_stories:
         if client.logged_in_as is None:
             report.errors.append("stories require login; skipping")
         else:
-            _walk_stories(
-                client, profile, target_root, report=report, options=opts, on_progress=on_progress,
-            )
+            _walk_stories(ig, user, target_root, report=report, options=opts, on_progress=on_progress)
 
     return report
 
 
+def _follows(ig: Any, user: User) -> bool:
+    """Return True if the logged-in account follows `user`. Best-effort."""
+    try:
+        return bool(getattr(user, "friendship_status", {}).following)  # type: ignore[union-attr]
+    except (AttributeError, KeyError):
+        return True  # default to optimistic — the data fetch will raise if not
+
+
 def _walk_posts(
-    client: InstagramClient,
-    profile: instaloader.Profile,
+    ig: Any,
+    user: User,
     target_root: Path,
     *,
     report: DownloadReport,
     options: DownloadOptions,
     on_progress: Callable[[str, dict[str, Any]], None] | None,
-) -> int:
+    client: InstagramClient,
+) -> None:
+    from instagrapi.exceptions import ClientError
+
     posts_dir = target_root / "posts"
     reels_dir = target_root / "reels"
     posts_dir.mkdir(parents=True, exist_ok=True)
     reels_dir.mkdir(parents=True, exist_ok=True)
 
-    processed = 0
-    for index, post in enumerate(profile.get_posts()):
-        if options.limit is not None and processed >= options.limit:
-            break
-        is_reel = bool(getattr(post, "is_video", False)) and bool(
-            getattr(post, "typename", "") in {"GraphVideo"}
-        )
-        kind_dir = reels_dir if is_reel else posts_dir
+    amount = options.limit or 0  # instagrapi: 0 = all
+    try:
+        medias = ig.user_medias(user.pk, amount=amount)
+    except ClientError as exc:
+        report.errors.append(f"user_medias: {exc}")
+        return
+
+    for index, media in enumerate(medias):
+        is_reel = _is_reel(media)
         if is_reel and not options.fetch_reels:
             continue
         if not is_reel and not options.fetch_posts:
             continue
+        kind_dir = reels_dir if is_reel else posts_dir
         try:
-            _save_post(post, kind_dir, options=options, client=client, report=report)
+            _save_media(ig, media, kind_dir, options=options, client=client, report=report)
         except Exception as exc:
-            report.errors.append(f"post {post.shortcode}: {exc}")
-            _log.warning("ig_post_failed", shortcode=post.shortcode, error=str(exc))
+            report.errors.append(f"media {media.code}: {exc}")
+            _log.warning("ig_media_failed", shortcode=media.code, error=str(exc))
             continue
-        processed += 1
         if is_reel:
             report.reels += 1
         else:
@@ -192,27 +211,29 @@ def _walk_posts(
         _emit(
             on_progress,
             "post_saved",
-            {"shortcode": post.shortcode, "kind": "reel" if is_reel else "post", "index": index},
+            {"shortcode": media.code, "kind": "reel" if is_reel else "post", "index": index},
         )
-    return processed
 
 
-def _save_post(
-    post: instaloader.Post,
+def _save_media(
+    ig: Any,
+    media: Media,
     parent_dir: Path,
     *,
     options: DownloadOptions,
     client: InstagramClient,
     report: DownloadReport,
 ) -> None:
-    post_dir = parent_dir / post.shortcode
+    from instagrapi.exceptions import ClientError
+
+    post_dir = parent_dir / media.code
     post_dir.mkdir(parents=True, exist_ok=True)
 
-    media_refs = _collect_media_urls(post)
+    media_refs = _collect_media_refs(media)
     assets_list: list[dict[str, Any]] = []
     if options.download_images:
         for ref in media_refs:
-            local = _download_media(ref["abs_url"], post_dir, kind="images")
+            local = _download_media_file(ref["abs_url"], post_dir)
             if local is not None:
                 ref["local_path"] = local
                 ref["sha256"] = _file_sha(post_dir / local)
@@ -221,22 +242,23 @@ def _save_post(
     else:
         assets_list = media_refs
 
-    metadata = _post_metadata(post)
+    metadata = _media_metadata(media)
     comments_payload: list[dict[str, Any]] = []
     if options.fetch_comments and client.logged_in_as is not None:
         try:
-            comments_payload = _collect_comments(post)
+            raw_comments = ig.media_comments(media.id, amount=options.comments_per_post)
+            comments_payload = [_serialize_comment(c) for c in raw_comments]
             report.comments_collected += len(comments_payload)
-        except Exception as exc:
-            report.errors.append(f"comments {post.shortcode}: {exc}")
+        except ClientError as exc:
+            report.errors.append(f"comments {media.code}: {exc}")
 
-    content_md = _render_post_md(post, metadata=metadata, asset_count=len(assets_list))
+    content_md = _render_media_md(media, metadata=metadata, asset_count=len(assets_list))
     (post_dir / "content.md").write_text(content_md, encoding="utf-8")
     (post_dir / "metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
     )
     (post_dir / "assets.json").write_text(
-        json.dumps(assets_list, indent=2, ensure_ascii=False), encoding="utf-8"
+        json.dumps(assets_list, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
     )
     (post_dir / "comments.json").write_text(
         json.dumps(comments_payload, indent=2, ensure_ascii=False, default=str),
@@ -245,32 +267,39 @@ def _save_post(
 
 
 def _walk_highlights(
-    client: InstagramClient,
-    profile: instaloader.Profile,
+    ig: Any,
+    user: User,
     target_root: Path,
     *,
     report: DownloadReport,
     options: DownloadOptions,
     on_progress: Callable[[str, dict[str, Any]], None] | None,
 ) -> None:
+    from instagrapi.exceptions import ClientError
+
     highlights_dir = target_root / "highlights"
     highlights_dir.mkdir(parents=True, exist_ok=True)
     try:
-        iterator = client.loader.get_highlights(user=profile)
-    except Exception as exc:
+        highlights = ig.user_highlights(user.pk)
+    except ClientError as exc:
         report.errors.append(f"highlights: {exc}")
         return
-    for hl in iterator:
-        title = _slug(getattr(hl, "title", "untitled") or "untitled")
+    for hl in highlights:
+        title = _slug(getattr(hl, "title", "") or "untitled")
         hl_dir = highlights_dir / title
         hl_dir.mkdir(parents=True, exist_ok=True)
-        meta = {"id": hl.unique_id, "title": hl.title, "items": []}
-        item_count = 0
-        for item in hl.get_items():
-            item_dir = hl_dir / str(item.mediaid)
+        items: list[dict[str, Any]] = []
+        try:
+            hl_full = ig.highlight_info(hl.pk)
+            hl_items = hl_full.items
+        except ClientError as exc:
+            report.errors.append(f"highlight {hl.title}: {exc}")
+            continue
+        for item in hl_items:
+            item_dir = hl_dir / str(item.pk)
             item_dir.mkdir(parents=True, exist_ok=True)
-            url = item.url
-            local = _download_media(url, item_dir, kind="images") if options.download_images else None
+            url = _best_image_url(item)
+            local = _download_media_file(url, item_dir) if options.download_images and url else None
             assets = [{
                 "kind": "image",
                 "abs_url": url,
@@ -283,174 +312,176 @@ def _walk_highlights(
             (item_dir / "content.md").write_text(
                 f"---\n"
                 f'title: "highlight: {hl.title}"\n'
-                f"url: \"ig://highlight/{hl.unique_id}/{item.mediaid}\"\n"
-                f"fetched_at: \"{datetime.now(UTC).isoformat()}\"\n"
+                f'url: "ig://highlight/{hl.pk}/{item.pk}"\n'
+                f'fetched_at: "{datetime.now(UTC).isoformat()}"\n'
                 f"---\n\n"
                 f"# {hl.title}\n\n"
-                f"Highlight item from {item.date_utc.isoformat()}\n",
+                f"Highlight item from {item.taken_at.isoformat() if item.taken_at else '?'}\n",
                 encoding="utf-8",
             )
-            meta["items"].append({"mediaid": item.mediaid, "date": item.date_utc.isoformat()})
-            item_count += 1
+            items.append({"pk": item.pk, "taken_at": str(item.taken_at)})
             if local is not None:
                 report.images_downloaded += 1
         (hl_dir / "highlight.json").write_text(
-            json.dumps(meta, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
+            json.dumps(
+                {"pk": hl.pk, "title": hl.title, "items": items},
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            ),
+            encoding="utf-8",
         )
-        report.highlights += item_count
-        _emit(on_progress, "highlight_saved", {"title": hl.title, "items": item_count})
+        report.highlights += len(items)
+        _emit(on_progress, "highlight_saved", {"title": hl.title, "items": len(items)})
 
 
 def _walk_stories(
-    client: InstagramClient,
-    profile: instaloader.Profile,
+    ig: Any,
+    user: User,
     target_root: Path,
     *,
     report: DownloadReport,
     options: DownloadOptions,
     on_progress: Callable[[str, dict[str, Any]], None] | None,
 ) -> None:
+    from instagrapi.exceptions import ClientError
+
     stories_dir = target_root / "stories"
     stories_dir.mkdir(parents=True, exist_ok=True)
     try:
-        iterator = client.loader.get_stories(userids=[profile.userid])
-    except Exception as exc:
+        stories = ig.user_stories(user.pk)
+    except ClientError as exc:
         report.errors.append(f"stories: {exc}")
         return
-    for story in iterator:
-        for item in story.get_items():
-            item_dir = stories_dir / str(item.mediaid)
-            item_dir.mkdir(parents=True, exist_ok=True)
-            url = item.url
-            local = _download_media(url, item_dir, kind="images") if options.download_images else None
-            (item_dir / "assets.json").write_text(
-                json.dumps(
-                    [{"kind": "image", "abs_url": url, "local_path": local}],
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-            (item_dir / "content.md").write_text(
-                f"---\n"
-                f'title: "story"\n'
-                f"url: \"ig://story/{item.mediaid}\"\n"
-                f"---\n\n# Story {item.mediaid}\n\nFrom {item.date_utc.isoformat()}\n",
-                encoding="utf-8",
-            )
-            report.stories += 1
-            if local is not None:
-                report.images_downloaded += 1
-            _emit(on_progress, "story_saved", {"mediaid": item.mediaid})
+    for story in stories:
+        item_dir = stories_dir / str(story.pk)
+        item_dir.mkdir(parents=True, exist_ok=True)
+        url = _best_image_url(story)
+        local = _download_media_file(url, item_dir) if options.download_images and url else None
+        (item_dir / "assets.json").write_text(
+            json.dumps(
+                [{"kind": "image", "abs_url": url, "local_path": local}],
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
+        (item_dir / "content.md").write_text(
+            f"---\n"
+            f'title: "story"\n'
+            f'url: "ig://story/{story.pk}"\n'
+            f'fetched_at: "{datetime.now(UTC).isoformat()}"\n'
+            f"---\n\n# Story {story.pk}\n\nFrom {story.taken_at.isoformat() if story.taken_at else '?'}\n",
+            encoding="utf-8",
+        )
+        report.stories += 1
+        if local is not None:
+            report.images_downloaded += 1
+        _emit(on_progress, "story_saved", {"pk": story.pk})
 
 
-def _collect_media_urls(post: instaloader.Post) -> list[dict[str, Any]]:
-    """Image URLs for the post / each carousel slide. Skips videos by design."""
-    media: list[dict[str, Any]] = []
-    if post.typename == "GraphSidecar":
-        for slide in post.get_sidecar_nodes():
-            if slide.is_video:
+def _is_reel(media: Media) -> bool:
+    """media_type 2 + product_type 'clips' or 'feed_video' → reel/video."""
+    product_type = getattr(media, "product_type", "") or ""
+    return getattr(media, "media_type", 0) == 2 and product_type in {"clips", "feed_video", "igtv"}
+
+
+def _collect_media_refs(media: Media) -> list[dict[str, Any]]:
+    """Image URLs per media. Carousels expand; videos return only the cover frame."""
+    refs: list[dict[str, Any]] = []
+    media_type = getattr(media, "media_type", 0)
+    resources = getattr(media, "resources", None) or []
+    if resources:
+        for resource in resources:
+            if getattr(resource, "media_type", 0) == 2:
+                # Video slide in a carousel — keep the cover only.
+                url = _safe_url(getattr(resource, "thumbnail_url", None))
+                if url:
+                    refs.append({"kind": "image", "abs_url": url, "is_video_cover": True})
                 continue
-            media.append({"kind": "image", "abs_url": slide.display_url, "alt": ""})
-    elif post.is_video:
-        # Reel / video — only keep the cover frame.
-        media.append({"kind": "image", "abs_url": post.url, "alt": "cover", "is_video_cover": True})
-    else:
-        media.append({"kind": "image", "abs_url": post.url, "alt": ""})
-    return media
+            url = _safe_url(getattr(resource, "thumbnail_url", None))
+            if url:
+                refs.append({"kind": "image", "abs_url": url})
+        return refs
+    if media_type == 2:
+        url = _safe_url(getattr(media, "thumbnail_url", None))
+        if url:
+            refs.append({"kind": "image", "abs_url": url, "is_video_cover": True})
+        return refs
+    url = _safe_url(getattr(media, "thumbnail_url", None))
+    if url:
+        refs.append({"kind": "image", "abs_url": url})
+    return refs
 
 
-def _post_metadata(post: instaloader.Post) -> dict[str, Any]:
+def _media_metadata(media: Media) -> dict[str, Any]:
+    location = getattr(media, "location", None)
+    caption = (getattr(media, "caption_text", "") or "").strip()
     return {
-        "shortcode": post.shortcode,
-        "url": f"https://www.instagram.com/p/{post.shortcode}/",
-        "owner_username": post.owner_username,
-        "is_video": post.is_video,
-        "typename": post.typename,
-        "date_utc": post.date_utc.isoformat() if post.date_utc else None,
-        "caption": post.caption,
-        "likes": post.likes,
-        "comments_count": post.comments,
-        "video_view_count": getattr(post, "video_view_count", None),
-        "location": _location_dict(post),
-        "hashtags": sorted(set(post.caption_hashtags or [])),
-        "mentions": sorted(set(post.caption_mentions or [])),
-        "tagged_users": _tagged_users(post),
+        "shortcode": media.code,
+        "pk": str(media.pk),
+        "id": media.id,
+        "url": f"https://www.instagram.com/p/{media.code}/",
+        "owner_username": getattr(media.user, "username", None),
+        "media_type": media.media_type,
+        "product_type": getattr(media, "product_type", ""),
+        "is_video": media.media_type == 2,
+        "taken_at": media.taken_at.isoformat() if media.taken_at else None,
+        "caption": caption,
+        "likes": getattr(media, "like_count", 0),
+        "comments_count": getattr(media, "comment_count", 0),
+        "video_view_count": getattr(media, "view_count", None) or getattr(media, "play_count", None),
+        "location": {"pk": location.pk, "name": location.name} if location else None,
+        "hashtags": sorted({h.lower() for h in re.findall(r"(?<![\w])#([A-Za-z0-9_]+)", caption)}),
+        "mentions": sorted({m.lower() for m in re.findall(r"(?<![\w])@([A-Za-z0-9._]+)", caption)}),
     }
 
 
-def _location_dict(post: instaloader.Post) -> dict[str, Any] | None:
-    loc = getattr(post, "location", None)
-    if loc is None:
-        return None
-    try:
-        return {"id": getattr(loc, "id", None), "name": getattr(loc, "name", None)}
-    except Exception:
-        return None
+def _serialize_comment(comment: object) -> dict[str, Any]:
+    return {
+        "pk": str(getattr(comment, "pk", "")),
+        "owner": getattr(getattr(comment, "user", None), "username", "?"),
+        "text": getattr(comment, "text", ""),
+        "likes": getattr(comment, "like_count", 0),
+        "created_at": (
+            getattr(comment, "created_at_utc", None)
+            or getattr(comment, "created_at", None)
+        ),
+        "replies": [],  # instagrapi exposes media_comments_chunk for nested; left empty here
+    }
 
 
-def _tagged_users(post: instaloader.Post) -> list[str]:
-    try:
-        return list(post.tagged_users)
-    except Exception:
-        return []
-
-
-def _collect_comments(post: instaloader.Post) -> list[dict[str, Any]]:
-    comments: list[dict[str, Any]] = []
-    for comment in post.get_comments():
-        replies: list[dict[str, Any]] = []
-        for reply in getattr(comment, "answers", []) or []:
-            replies.append(
-                {
-                    "owner": getattr(reply.owner, "username", "?"),
-                    "text": reply.text,
-                    "likes": getattr(reply, "likes_count", 0),
-                    "created_at": reply.created_at_utc.isoformat() if reply.created_at_utc else None,
-                }
-            )
-        comments.append(
-            {
-                "owner": getattr(comment.owner, "username", "?"),
-                "text": comment.text,
-                "likes": getattr(comment, "likes_count", 0),
-                "created_at": comment.created_at_utc.isoformat() if comment.created_at_utc else None,
-                "replies": replies,
-            }
-        )
-    return comments
-
-
-def _render_post_md(
-    post: instaloader.Post,
-    *,
-    metadata: dict[str, Any],
-    asset_count: int,
-) -> str:
-    title = (post.caption or post.shortcode).strip().splitlines()[0][:80] or post.shortcode
+def _render_media_md(media: Media, *, metadata: dict[str, Any], asset_count: int) -> str:
+    caption = (getattr(media, "caption_text", "") or "").strip()
+    title = caption.splitlines()[0][:80] if caption else media.code
+    owner = getattr(media.user, "username", "?")
+    taken = media.taken_at.isoformat() if media.taken_at else "?"
+    likes = metadata.get("likes", 0)
+    comments = metadata.get("comments_count", 0)
     lines = [
         "---",
-        f'url: "https://www.instagram.com/p/{post.shortcode}/"',
-        f'final_url: "https://www.instagram.com/p/{post.shortcode}/"',
+        f'url: "https://www.instagram.com/p/{media.code}/"',
+        f'final_url: "https://www.instagram.com/p/{media.code}/"',
         f'title: "{_yaml_escape(title)}"',
         f'fetched_at: "{datetime.now(UTC).isoformat()}"',
         "status_code: 200",
         'tier: "instagram"',
-        f"likes: {metadata.get('likes', 0)}",
-        f"comments_count: {metadata.get('comments_count', 0)}",
-        f"is_video: {str(post.is_video).lower()}",
+        f"likes: {likes}",
+        f"comments_count: {comments}",
+        f"is_video: {str(media.media_type == 2).lower()}",
         f"images: {asset_count}",
         "---",
         "",
         f"# {title}",
         "",
-        f"_posted by **@{post.owner_username}** on {post.date_utc.isoformat() if post.date_utc else '?'}_",
+        f"_posted by **@{owner}** on {taken}_",
         "",
-        f"❤ {metadata.get('likes', 0)}  ·  💬 {metadata.get('comments_count', 0)}",
+        f"❤ {likes}  ·  💬 {comments}",
         "",
     ]
-    if post.caption:
-        lines.append(post.caption)
+    if caption:
+        lines.append(caption)
         lines.append("")
     if metadata.get("hashtags"):
         lines.append("**Hashtags:** " + " ".join(f"#{h}" for h in metadata["hashtags"]))
@@ -465,29 +496,42 @@ def _render_post_md(
     return "\n".join(lines) + "\n"
 
 
+def _serialize_user(user: User) -> dict[str, Any]:
+    return {
+        "username": user.username,
+        "pk": str(user.pk),
+        "full_name": user.full_name,
+        "biography": getattr(user, "biography", ""),
+        "followers": getattr(user, "follower_count", 0),
+        "followees": getattr(user, "following_count", 0),
+        "media_count": getattr(user, "media_count", 0),
+        "is_private": user.is_private,
+        "is_verified": getattr(user, "is_verified", False),
+        "external_url": getattr(user, "external_url", None),
+        "profile_pic_url": str(getattr(user, "profile_pic_url", "") or ""),
+    }
+
+
 def _yaml_escape(text: str) -> str:
     return text.replace('"', '\\"')
 
 
-def _serialize_profile(profile: instaloader.Profile) -> dict[str, Any]:
-    return {
-        "username": profile.username,
-        "userid": profile.userid,
-        "full_name": profile.full_name,
-        "biography": profile.biography,
-        "followers": profile.followers,
-        "followees": profile.followees,
-        "media_count": profile.mediacount,
-        "is_private": profile.is_private,
-        "is_verified": profile.is_verified,
-        "external_url": profile.external_url,
-        "profile_pic_url": profile.profile_pic_url,
-    }
+def _safe_url(url: object) -> str | None:
+    if url is None:
+        return None
+    s = str(url)
+    return s or None
 
 
-def _download_media(url: str, page_dir: Path, *, kind: str) -> str | None:
-    """Synchronous httpx download to keep parity with instaloader's blocking API."""
-    images_dir = page_dir / "assets" / kind
+def _best_image_url(item: object) -> str | None:
+    """Pick the best still-image URL from a story / highlight item."""
+    return _safe_url(getattr(item, "thumbnail_url", None) or getattr(item, "image_versions2", None))
+
+
+def _download_media_file(url: str | None, page_dir: Path) -> str | None:
+    if not url:
+        return None
+    images_dir = page_dir / "assets" / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
     try:
         with httpx.Client(timeout=60.0, follow_redirects=True) as client:
@@ -502,8 +546,7 @@ def _download_media(url: str, page_dir: Path, *, kind: str) -> str | None:
     target = images_dir / f"{sha}{ext}"
     if not target.exists():
         target.write_bytes(body)
-    rel = target.relative_to(page_dir)
-    return str(rel).replace("\\", "/")
+    return str(target.relative_to(page_dir)).replace("\\", "/")
 
 
 def _guess_ext(url: str, content_type: str | None) -> str:
@@ -546,7 +589,7 @@ async def download_profile_async(
     options: DownloadOptions | None = None,
     on_progress: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> DownloadReport:
-    """Async wrapper — instaloader is sync, so we run it on a worker thread."""
+    """Run the (blocking) instagrapi download in a worker thread."""
     return await asyncio.to_thread(
         download_profile,
         client,

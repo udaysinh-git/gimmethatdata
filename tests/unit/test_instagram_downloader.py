@@ -1,4 +1,4 @@
-"""Tests for instagram/downloader — fully mocked instaloader."""
+"""Tests for instagram/downloader — fully mocked instagrapi."""
 
 from __future__ import annotations
 
@@ -6,59 +6,31 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from gimmethatdata.instagram.client import InstagramClient
 from gimmethatdata.instagram.downloader import (
     DownloadOptions,
-    _collect_media_urls,
-    _post_metadata,
-    _render_post_md,
+    _collect_media_refs,
+    _is_reel,
+    _media_metadata,
+    _render_media_md,
+    _serialize_user,
     download_profile,
 )
 
 
-def _fake_post(
-    *,
-    shortcode: str = "ABC123",
-    caption: str = "hello world",
-    is_video: bool = False,
-    typename: str = "GraphImage",
-    url: str = "https://cdn.example/image.jpg",
-    likes: int = 10,
-    comments: int = 0,
-    hashtags: list[str] | None = None,
-    mentions: list[str] | None = None,
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        shortcode=shortcode,
-        caption=caption,
-        date_utc=datetime(2026, 5, 19, 10, 0, 0, tzinfo=UTC),
-        likes=likes,
-        comments=comments,
-        is_video=is_video,
-        typename=typename,
-        url=url,
-        owner_username="udaysinh",
-        caption_hashtags=hashtags or [],
-        caption_mentions=mentions or [],
-        tagged_users=[],
-        video_view_count=0,
-        location=None,
-    )
-
-
-def _fake_profile(*, username: str = "udaysinh", is_private: bool = False) -> SimpleNamespace:
+def _fake_user(*, username: str = "udaysinh", is_private: bool = False, pk: int = 42) -> SimpleNamespace:
     return SimpleNamespace(
         username=username,
-        userid=1,
+        pk=pk,
         full_name="Test User",
         biography="bio",
-        followers=100,
-        followees=50,
-        mediacount=2,
+        follower_count=100,
+        following_count=50,
+        media_count=2,
         is_private=is_private,
         is_verified=False,
         external_url=None,
@@ -66,94 +38,125 @@ def _fake_profile(*, username: str = "udaysinh", is_private: bool = False) -> Si
     )
 
 
-def test_render_post_md_contains_caption_and_meta() -> None:
-    post = _fake_post(
-        caption="Big launch today!",
-        hashtags=["launch", "ai"],
-        mentions=["acme"],
+def _fake_media(
+    *,
+    code: str = "ABC123",
+    pk: int = 1,
+    media_type: int = 1,  # 1=photo, 2=video, 8=carousel
+    product_type: str = "feed",
+    caption: str = "hello world",
+    likes: int = 10,
+    comments_count: int = 0,
+    thumbnail_url: str = "https://cdn.example/image.jpg",
+    resources: list | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        code=code,
+        pk=pk,
+        id=f"{pk}_999",
+        media_type=media_type,
+        product_type=product_type,
+        caption_text=caption,
+        taken_at=datetime(2026, 5, 19, 10, 0, 0, tzinfo=UTC),
+        like_count=likes,
+        comment_count=comments_count,
+        view_count=0,
+        play_count=0,
+        location=None,
+        thumbnail_url=thumbnail_url,
+        resources=resources or [],
+        user=SimpleNamespace(username="udaysinh"),
     )
-    metadata = _post_metadata(post)
-    md = _render_post_md(post, metadata=metadata, asset_count=1)
-    assert "Big launch today!" in md
+
+
+def test_serialize_user_returns_flat_dict() -> None:
+    user = _fake_user()
+    payload = _serialize_user(user)
+    assert payload["username"] == "udaysinh"
+    assert payload["followers"] == 100
+    assert payload["is_private"] is False
+
+
+def test_is_reel_classification() -> None:
+    assert _is_reel(_fake_media(media_type=2, product_type="clips"))
+    assert _is_reel(_fake_media(media_type=2, product_type="feed_video"))
+    assert not _is_reel(_fake_media(media_type=1, product_type="feed"))
+    assert not _is_reel(_fake_media(media_type=8, product_type="feed"))
+
+
+def test_collect_media_refs_carousel() -> None:
+    r1 = SimpleNamespace(media_type=1, thumbnail_url="https://x/1.jpg")
+    r2 = SimpleNamespace(media_type=2, thumbnail_url="https://x/2.jpg")  # video slide → cover only
+    r3 = SimpleNamespace(media_type=1, thumbnail_url="https://x/3.jpg")
+    media = _fake_media(media_type=8, resources=[r1, r2, r3])
+    refs = _collect_media_refs(media)
+    urls = [r["abs_url"] for r in refs]
+    assert urls == ["https://x/1.jpg", "https://x/2.jpg", "https://x/3.jpg"]
+    assert refs[1].get("is_video_cover") is True
+
+
+def test_collect_media_refs_video() -> None:
+    media = _fake_media(media_type=2, product_type="clips", thumbnail_url="https://x/cover.jpg")
+    refs = _collect_media_refs(media)
+    assert len(refs) == 1
+    assert refs[0]["is_video_cover"] is True
+
+
+def test_render_media_md_has_caption_and_hashtags() -> None:
+    media = _fake_media(caption="Big launch! #launch @acme")
+    metadata = _media_metadata(media)
+    md = _render_media_md(media, metadata=metadata, asset_count=1)
+    assert "Big launch!" in md
     assert "@udaysinh" in md
     assert "#launch" in md
     assert "@acme" in md
-    assert "❤ 10" in md or "10" in md
-
-
-def test_collect_media_urls_skips_videos() -> None:
-    post = _fake_post(is_video=True, typename="GraphVideo", url="https://cdn.example/v.mp4")
-    media = _collect_media_urls(post)
-    assert len(media) == 1
-    assert media[0]["is_video_cover"] is True
-
-
-def test_collect_media_urls_handles_sidecar() -> None:
-    side_a = SimpleNamespace(is_video=False, display_url="https://x/1.jpg")
-    side_b = SimpleNamespace(is_video=True, display_url="https://x/2.mp4")
-    side_c = SimpleNamespace(is_video=False, display_url="https://x/3.jpg")
-    post = SimpleNamespace(
-        shortcode="S",
-        typename="GraphSidecar",
-        is_video=False,
-        url="https://x/cover.jpg",
-        get_sidecar_nodes=lambda: [side_a, side_b, side_c],
-    )
-    media = _collect_media_urls(post)  # type: ignore[arg-type]
-    urls = [m["abs_url"] for m in media]
-    assert urls == ["https://x/1.jpg", "https://x/3.jpg"]
 
 
 @pytest.mark.parametrize("download_images", [False])
 def test_download_profile_writes_layout(tmp_path: Path, download_images: bool) -> None:
-    posts = [
-        _fake_post(shortcode="AAA", caption="first post"),
-        _fake_post(shortcode="BBB", caption="second", is_video=True, typename="GraphVideo"),
+    user = _fake_user()
+    medias = [
+        _fake_media(code="AAA", caption="first post", media_type=1, product_type="feed"),
+        _fake_media(
+            code="BBB",
+            caption="reel",
+            media_type=2,
+            product_type="clips",
+            thumbnail_url="https://x/reel-cover.jpg",
+        ),
     ]
-    fake_profile = _fake_profile()
-    fake_profile.get_posts = lambda: iter(posts)
+    ig = MagicMock()
+    ig.user_info_by_username.return_value = user
+    ig.user_medias.return_value = medias
 
-    loader = MagicMock()
-    client = InstagramClient(loader=loader, logged_in_as=None)
+    client = InstagramClient(client=ig, logged_in_as=None)
 
-    with patch(
-        "gimmethatdata.instagram.downloader.instaloader.Profile.from_username",
-        return_value=fake_profile,
-    ):
-        report = download_profile(
-            client,
-            "udaysinh",
-            out_root=tmp_path,
-            options=DownloadOptions(
-                fetch_comments=False,
-                download_images=download_images,
-            ),
-        )
+    report = download_profile(
+        client,
+        "udaysinh",
+        out_root=tmp_path,
+        options=DownloadOptions(
+            fetch_comments=False,
+            download_images=download_images,
+        ),
+    )
 
     profile_root = tmp_path / "instagram" / "udaysinh"
     assert (profile_root / "profile.json").exists()
     payload = json.loads((profile_root / "profile.json").read_text(encoding="utf-8"))
     assert payload["username"] == "udaysinh"
 
-    post_dir = profile_root / "posts" / "AAA"
-    assert (post_dir / "content.md").exists()
-    assert (post_dir / "metadata.json").exists()
-    assert (post_dir / "assets.json").exists()
-
-    reel_dir = profile_root / "reels" / "BBB"
-    assert (reel_dir / "content.md").exists()
+    assert (profile_root / "posts" / "AAA" / "content.md").exists()
+    assert (profile_root / "reels" / "BBB" / "content.md").exists()
     assert report.posts == 1
     assert report.reels == 1
 
 
 def test_download_profile_aborts_on_private_anonymous(tmp_path: Path) -> None:
-    fake_profile = _fake_profile(is_private=True)
-    loader = MagicMock()
-    client = InstagramClient(loader=loader, logged_in_as=None)
-    with patch(
-        "gimmethatdata.instagram.downloader.instaloader.Profile.from_username",
-        return_value=fake_profile,
-    ):
-        report = download_profile(client, "private_user", out_root=tmp_path)
+    user = _fake_user(is_private=True)
+    ig = MagicMock()
+    ig.user_info_by_username.return_value = user
+    client = InstagramClient(client=ig, logged_in_as=None)
+    report = download_profile(client, "private_user", out_root=tmp_path)
     assert report.posts == 0
     assert any("private" in err for err in report.errors)

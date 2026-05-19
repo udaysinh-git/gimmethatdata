@@ -808,6 +808,53 @@ async def _run_watch(
     )
 
 
+@app.command(name="ig-import-cookie")
+def ig_import_cookie(
+    username: Annotated[
+        str,
+        typer.Argument(help="The IG account the cookie belongs to (your own handle)."),
+    ],
+    sessionid: Annotated[
+        str,
+        typer.Option(
+            "--sessionid",
+            help="Value of the `sessionid` cookie copied from your browser.",
+        ),
+    ],
+    csrftoken: Annotated[
+        str | None,
+        typer.Option("--csrftoken", help="Optional `csrftoken` cookie value."),
+    ] = None,
+    session_file: Annotated[
+        Path,
+        typer.Option(
+            "--session-file",
+            help="Where to write the resulting instaloader session file.",
+        ),
+    ] = Path(".ignore/ig-session"),
+) -> None:
+    """Mint an instaloader session file from a browser `sessionid` cookie.
+
+    Use this when `--login` keeps returning IG's 'Unexpected null login result' —
+    a real browser still works, so we ride on its cookie. Open instagram.com,
+    log in normally, then copy the `sessionid` cookie from DevTools.
+    """
+    from gimmethatdata.instagram.client import IGLoginError, import_session_from_cookie
+
+    try:
+        path = import_session_from_cookie(
+            username=username,
+            sessionid=sessionid,
+            session_file=session_file,
+        )
+    except IGLoginError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(f"[green]wrote[/] {path}")
+    console.print(
+        f"Now run: [cyan]uv run gimmethatdata instagram <user> --session-file {path}[/]"
+    )
+
+
 @app.command()
 def instagram(
     username: Annotated[str, typer.Argument(help="Instagram handle (no @).")],
@@ -830,7 +877,14 @@ def instagram(
         Path | None,
         typer.Option(
             "--session-file",
-            help="Reuse an existing instaloader session file (preferred; supports 2FA accounts).",
+            help="Reuse / save an instagrapi session file (preferred for repeat runs).",
+        ),
+    ] = None,
+    verification_code: Annotated[
+        str | None,
+        typer.Option(
+            "--verification-code",
+            help="6-digit 2FA code (if the account has 2FA enabled).",
         ),
     ] = None,
     posts: Annotated[bool, typer.Option("--posts/--no-posts")] = True,
@@ -884,6 +938,7 @@ def instagram(
             login_user=login_user,
             password=password,
             session_file=session_file,
+            verification_code=verification_code,
             posts=posts,
             reels=reels,
             highlights=highlights,
@@ -904,6 +959,7 @@ async def _run_instagram(
     login_user: str | None,
     password: str | None,
     session_file: Path | None,
+    verification_code: str | None,
     posts: bool,
     reels: bool,
     highlights: bool,
@@ -935,6 +991,7 @@ async def _run_instagram(
                 username=login_user,
                 password=pw,
                 session_file=session_file,
+                verification_code=verification_code,
             )
         else:
             client = InstagramClient.anonymous()

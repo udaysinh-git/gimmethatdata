@@ -61,7 +61,7 @@ pdf = [
     "markdown>=3.6",
 ]
 instagram = [
-    "instaloader>=4.13",
+    "instagrapi>=2.1",
 ]
 all = [
     "gimmethatdata[bypass,media,state,ocr,pdf,instagram]",
@@ -145,7 +145,11 @@ module = [
     "pytesseract",
     "markdown",
     "pypdf",
-    "instaloader",
+    "instagrapi",
+    "instagrapi.*",
+    "moviepy",
+    "moviepy.*",
+    "pycryptodomex",
 ]
 ignore_missing_imports = true
 

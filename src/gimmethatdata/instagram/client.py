@@ -1,23 +1,25 @@
-"""Thin wrapper around `instaloader.Instaloader` for session lifecycle.
+"""Thin wrapper around `instagrapi.Client` for session lifecycle.
 
-Login flow:
-  1. If `session_file` is given and exists, load it.
-  2. Otherwise log in with `username` + `password` (prompts for `password`
-     if not provided). Saves the session to `session_file` so the next run
-     skips login entirely.
+instagrapi talks to Instagram's mobile private API (the one their app uses),
+which is dramatically more reliable than the public web/GraphQL surface that
+instaloader scrapes — IG hardened the web path against automation in 2024.
 
-We do not handle 2FA prompts here — instaloader's CLI does that interactively
-and would conflict with our Typer command. Users with 2FA should run
-`instaloader --login=<user>` once to mint a session file, then pass that path
-via `--session-file`.
+Three login paths:
+
+  1. `from_session_file()`        — reuse instagrapi's `settings.json`.
+  2. `login()`                    — username + password (with optional 2FA code).
+  3. `import_session_from_cookie()` — paste `sessionid` from a browser, which is
+                                       the most reliable fallback when password
+                                       login hits a challenge.
 """
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from dataclasses import dataclass
 from pathlib import Path
-
-import instaloader
+from typing import Any
 
 from gimmethatdata.logging_setup import get_logger
 
@@ -30,16 +32,18 @@ class IGLoginError(Exception):
 
 @dataclass
 class InstagramClient:
-    """Holds an authenticated `instaloader.Instaloader`."""
+    """Holds an authenticated `instagrapi.Client`."""
 
-    loader: instaloader.Instaloader
+    client: Any  # instagrapi.Client — typed Any so this module imports without the extra
     logged_in_as: str | None
 
     @classmethod
-    def anonymous(cls, *, user_agent: str | None = None) -> InstagramClient:
-        """Anonymous client — public profiles + public posts only."""
-        loader = _make_loader(user_agent=user_agent)
-        return cls(loader=loader, logged_in_as=None)
+    def anonymous(cls) -> InstagramClient:
+        """No login — mostly fails on Instagram's current API. Kept for symmetry."""
+        from instagrapi import Client
+
+        client = _quiet_client(Client())
+        return cls(client=client, logged_in_as=None)
 
     @classmethod
     def from_session_file(
@@ -47,18 +51,23 @@ class InstagramClient:
         *,
         username: str,
         session_file: Path,
-        user_agent: str | None = None,
     ) -> InstagramClient:
-        """Resume a session previously minted via instaloader CLI."""
-        loader = _make_loader(user_agent=user_agent)
+        from instagrapi import Client
+        from instagrapi.exceptions import ClientError
+
+        client = _quiet_client(Client())
         try:
-            loader.load_session_from_file(username, str(session_file))
+            client.load_settings(session_file)
         except FileNotFoundError as exc:
             raise IGLoginError(f"session file not found: {session_file}") from exc
         except Exception as exc:
             raise IGLoginError(f"failed to load session: {exc}") from exc
+        try:
+            client.get_timeline_feed()  # cheap auth check
+        except ClientError as exc:
+            raise IGLoginError(f"session is invalid or expired: {exc}") from exc
         _log.info("ig_session_loaded", user=username, path=str(session_file))
-        return cls(loader=loader, logged_in_as=username)
+        return cls(client=client, logged_in_as=username)
 
     @classmethod
     def login(
@@ -67,60 +76,98 @@ class InstagramClient:
         username: str,
         password: str,
         session_file: Path | None = None,
-        user_agent: str | None = None,
+        verification_code: str | None = None,
     ) -> InstagramClient:
-        """Username/password login. Saves the session to `session_file` if given."""
-        loader = _make_loader(user_agent=user_agent)
+        from instagrapi import Client
+        from instagrapi.exceptions import (
+            BadPassword,
+            ChallengeRequired,
+            ClientError,
+            PleaseWaitFewMinutes,
+            TwoFactorRequired,
+        )
+
+        client = _quiet_client(Client())
+        if session_file is not None and session_file.exists():
+            try:
+                client.load_settings(session_file)
+            except Exception as exc:
+                _log.debug("ig_settings_load_skipped", error=str(exc))
         try:
-            loader.login(username, password)
-        except instaloader.exceptions.TwoFactorAuthRequiredException as exc:
+            client.login(
+                username,
+                password,
+                verification_code=verification_code or "",
+            )
+        except BadPassword as exc:
+            raise IGLoginError("bad password") from exc
+        except TwoFactorRequired as exc:
             raise IGLoginError(
-                "this account has 2FA enabled. Mint a session externally with "
-                "`instaloader --login=<user>` and pass --session-file instead."
+                "this account requires a 2FA code. Re-run with --verification-code <6-digit>."
             ) from exc
-        except instaloader.exceptions.BadCredentialsException as exc:
-            raise IGLoginError("bad credentials") from exc
-        except instaloader.exceptions.ConnectionException as exc:
-            raise IGLoginError(_translate_login_error(str(exc))) from exc
-        except Exception as exc:
-            raise IGLoginError(_translate_login_error(str(exc))) from exc
+        except ChallengeRequired as exc:
+            raise IGLoginError(_challenge_help(exc)) from exc
+        except PleaseWaitFewMinutes as exc:
+            raise IGLoginError(
+                f"Instagram is rate-limiting this account: {exc}. "
+                "Wait 5-10 minutes and retry."
+            ) from exc
+        except ClientError as exc:
+            raise IGLoginError(f"login failed: {exc}") from exc
         if session_file is not None:
             session_file.parent.mkdir(parents=True, exist_ok=True)
-            loader.save_session_to_file(str(session_file))
+            client.dump_settings(session_file)
             _log.info("ig_session_saved", path=str(session_file))
-        return cls(loader=loader, logged_in_as=username)
+        return cls(client=client, logged_in_as=username)
 
 
-def _translate_login_error(raw: str) -> str:
-    """Map instaloader's raw login errors into something actionable."""
-    lower = raw.lower()
-    if "null login result" in lower or "unexpected" in lower or "checkpoint" in lower:
-        return (
-            "Instagram flagged this login as a new/unfamiliar device. "
-            "Open the Instagram app on your phone where this account is signed in, "
-            "accept the 'was this you?' prompt, wait a minute, then either rerun this "
-            "command or mint a session via `uv run instaloader --login=<user>` and pass "
-            "the resulting file via --session-file."
-        )
-    if "challenge" in lower or "suspicious" in lower:
-        return (
-            "Instagram is asking for a checkpoint / suspicious-login challenge. "
-            "Open the app, confirm it was you, then retry. If it persists, use "
-            "`uv run instaloader --login=<user>` once — it handles the challenge flow."
-        )
-    return f"login failed: {raw}"
+def import_session_from_cookie(
+    *,
+    username: str,
+    sessionid: str,
+    session_file: Path,
+) -> Path:
+    """Mint an instagrapi settings file from a browser-minted `sessionid` cookie.
+
+    Use when `login()` keeps tripping a challenge:
+
+      1. Open https://www.instagram.com/ in your browser, log in normally.
+      2. DevTools -> Application -> Cookies -> instagram.com.
+      3. Copy the value of `sessionid` (the long URL-encoded string).
+      4. Pass it via `--sessionid`.
+    """
+    from instagrapi import Client
+    from instagrapi.exceptions import ClientError
+
+    client = _quiet_client(Client())
+    try:
+        client.login_by_sessionid(sessionid)
+    except ClientError as exc:
+        raise IGLoginError(
+            "Instagram rejected the cookie. Re-copy `sessionid` from your "
+            f"browser (must currently be logged in). Underlying error: {exc}"
+        ) from exc
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    client.dump_settings(session_file)
+    _log.info("ig_session_imported_from_cookie", user=username, path=str(session_file))
+    return session_file
 
 
-def _make_loader(*, user_agent: str | None) -> instaloader.Instaloader:
-    """Construct an Instaloader instance with conservative defaults."""
-    return instaloader.Instaloader(
-        download_videos=False,
-        download_video_thumbnails=False,
-        download_geotags=False,
-        save_metadata=False,
-        compress_json=False,
-        post_metadata_txt_pattern="",
-        storyitem_metadata_txt_pattern="",
-        quiet=True,
-        user_agent=user_agent,
+def _quiet_client(client: Any) -> Any:
+    """Lower instagrapi's chatty loggers — we surface our own progress."""
+    logging.getLogger("public_request").setLevel(logging.WARNING)
+    logging.getLogger("private_request").setLevel(logging.WARNING)
+    with contextlib.suppress(AttributeError):
+        client.request_logger.setLevel(logging.WARNING)
+    return client
+
+
+def _challenge_help(exc: Any) -> str:
+    return (
+        "Instagram threw a challenge (checkpoint / unfamiliar device). Either:\n"
+        "  1. Open the Instagram app on a known device, accept any pending "
+        "'was this you?' prompts, then retry.\n"
+        "  2. Use `gimmethatdata ig-import-cookie <user> --sessionid <value>` "
+        "after logging in via your browser — it sidesteps the challenge entirely.\n"
+        f"Raw: {exc}"
     )

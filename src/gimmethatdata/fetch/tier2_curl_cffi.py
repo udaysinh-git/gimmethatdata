@@ -20,15 +20,19 @@ class CurlCffiFetcher:
         timeout_seconds: float = 30.0,
         impersonate: str = "chrome124",
         proxy: str | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         from curl_cffi.requests import AsyncSession
 
         self._timeout = timeout_seconds
         self._impersonate = impersonate
+        headers: dict[str, str] = {"User-Agent": user_agent}
+        if extra_headers:
+            headers.update(extra_headers)
         self._session: Any = AsyncSession(
             timeout=timeout_seconds,
             impersonate=impersonate,  # type: ignore[arg-type]
-            headers={"User-Agent": user_agent},
+            headers=headers,
             proxy=proxy,
         )
 

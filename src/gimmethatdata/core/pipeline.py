@@ -17,6 +17,7 @@ from gimmethatdata.parse.assets import discover_assets, discover_links
 from gimmethatdata.parse.extractor import extract_main_html, fallback_main_html
 from gimmethatdata.parse.metadata import extract_meta
 from gimmethatdata.parse.ocr import append_ocr_section, ocr_local_assets
+from gimmethatdata.parse.pdf_extract import is_pdf_response, parse_pdf_bytes, pdf_to_markdown
 from gimmethatdata.parse.plugins import Extractor, select_extractor
 from gimmethatdata.parse.presets import Preset, render
 from gimmethatdata.persist.writer import write_page
@@ -26,6 +27,44 @@ _log = get_logger(__name__)
 
 class RobotsBlocked(Exception):
     """Raised when robots.txt disallows the requested URL."""
+
+
+def _build_pdf_page(
+    *,
+    canonical_url: str,
+    fetch_result: FetchResult,
+    base_url: str,
+) -> tuple[PageMetadata, str, list, list]:  # type: ignore[type-arg]
+    """Build metadata + body for a PDF response."""
+    from gimmethatdata.parse.markdown import html_to_markdown as _md_passthrough  # noqa: F401
+
+    doc = parse_pdf_bytes(fetch_result.body)
+    headers_keep = {
+        k: v
+        for k, v in fetch_result.headers.items()
+        if k in {"content-type", "content-length", "server", "etag", "last-modified"}
+    }
+    meta_extra: dict[str, str] = dict(doc.meta) if doc else {}
+    metadata = PageMetadata(
+        url=canonical_url,
+        final_url=base_url,
+        title=(doc.title if doc and doc.title else "PDF document"),
+        description=meta_extra.get("subject"),
+        lang=None,
+        canonical=None,
+        meta=meta_extra,
+        http_headers=headers_keep,
+        status_code=fetch_result.status_code,
+        tier=fetch_result.tier,
+        elapsed_ms=fetch_result.elapsed_ms,
+        fetched_at=fetch_result.fetched_at,
+    )
+    body = (
+        "<pre>" + (pdf_to_markdown(doc).replace("&", "&amp;").replace("<", "&lt;")) + "</pre>"
+        if doc
+        else "<p><em>PDF could not be parsed.</em></p>"
+    )
+    return metadata, body, [], []
 
 
 @dataclass
@@ -71,41 +110,50 @@ async def scrape_one(
         ms=fetch_result.elapsed_ms,
     )
 
-    html_text = fetch_result.text
     base_url = fetch_result.final_url
+    content_type = fetch_result.headers.get("content-type")
+    is_pdf = is_pdf_response(content_type=content_type, body=fetch_result.body)
 
-    meta_dict = extract_meta(html_text)
-    page_metadata = PageMetadata(
-        url=canonical_url,
-        final_url=base_url,
-        status_code=fetch_result.status_code,
-        tier=fetch_result.tier,
-        elapsed_ms=fetch_result.elapsed_ms,
-        fetched_at=fetch_result.fetched_at,
-        http_headers={
-            k: v
-            for k, v in fetch_result.headers.items()
-            if k in {"content-type", "content-length", "server", "cf-ray", "x-cache"}
-        },
-        **meta_dict,
-    )
+    if is_pdf:
+        page_metadata, main_html, assets, links = _build_pdf_page(
+            canonical_url=canonical_url,
+            fetch_result=fetch_result,
+            base_url=base_url,
+        )
+    else:
+        html_text = fetch_result.text
+        meta_dict = extract_meta(html_text)
+        page_metadata = PageMetadata(
+            url=canonical_url,
+            final_url=base_url,
+            status_code=fetch_result.status_code,
+            tier=fetch_result.tier,
+            elapsed_ms=fetch_result.elapsed_ms,
+            fetched_at=fetch_result.fetched_at,
+            http_headers={
+                k: v
+                for k, v in fetch_result.headers.items()
+                if k in {"content-type", "content-length", "server", "cf-ray", "x-cache"}
+            },
+            **meta_dict,
+        )
 
-    extractor = select_extractor(opts.extractors, canonical_url) if opts.extractors else None
-    if extractor is not None:
-        doc = extractor.extract(html_text, url=canonical_url)
-        if doc is not None:
-            main_html = doc.main_html
-            if doc.title and not page_metadata.title:
-                page_metadata.title = doc.title
-            if doc.extra_meta:
-                page_metadata.meta.update(doc.extra_meta)
-            _log.info("extractor_used", name=extractor.name, url=canonical_url)
+        extractor = select_extractor(opts.extractors, canonical_url) if opts.extractors else None
+        if extractor is not None:
+            doc = extractor.extract(html_text, url=canonical_url)
+            if doc is not None:
+                main_html = doc.main_html
+                if doc.title and not page_metadata.title:
+                    page_metadata.title = doc.title
+                if doc.extra_meta:
+                    page_metadata.meta.update(doc.extra_meta)
+                _log.info("extractor_used", name=extractor.name, url=canonical_url)
+            else:
+                main_html = extract_main_html(html_text, url=base_url) or fallback_main_html(html_text)
         else:
             main_html = extract_main_html(html_text, url=base_url) or fallback_main_html(html_text)
-    else:
-        main_html = extract_main_html(html_text, url=base_url) or fallback_main_html(html_text)
-    assets = discover_assets(html_text, base_url=base_url)
-    links = discover_links(html_text, base_url=base_url)
+        assets = discover_assets(html_text, base_url=base_url)
+        links = discover_links(html_text, base_url=base_url)
 
     out_dir = derive_output_dir(out_root, base_url)
 

@@ -34,13 +34,34 @@ uv run gimmethatdata setup
 # scrape a single page
 uv run gimmethatdata scrape https://example.com --out ./out
 
-# crawl an entire site (depth + page-count caps)
+# crawl an entire site (depth + page-count caps; --include-subdomains seeds from crt.sh)
 uv run gimmethatdata crawl https://example.com --depth 2 --max-pages 50
+
+# scrape behind a login (basic / bearer / cookies / arbitrary headers)
+uv run gimmethatdata scrape https://api.example.com/dashboard \
+  --auth bearer:eyJhbGc... \
+  --cookie "sid=abc123" \
+  -H "X-Org-Id: 42"
+
+# turn on the on-disk HTTP cache so re-runs of the same URLs are free
+uv run gimmethatdata scrape https://example.com --cache-dir .ignore/cache
+
+# watch a site every hour and diff each run against the previous
+uv run gimmethatdata watch https://example.com --every 1h --mode crawl --depth 1
+
+# compare two scrape snapshots
+uv run gimmethatdata diff ./out/yesterday ./out/today --out diff.md
+
+# search every page you've ever scraped (sqlite FTS5)
+uv run gimmethatdata search "embedding model" --out ./out --reindex
+
+# discover subdomains via Certificate Transparency
+uv run gimmethatdata subdomains example.com
 
 # export everything you've scraped to a PDF (images embedded, video links badged)
 uv run gimmethatdata export-pdf ./out/example.com --out report.pdf
 
-# launch the TUI
+# launch the TUI (Home · NewJob · Progress · Inspector · Search · Sitemap · Diff · Settings)
 uv run gimmethatdata tui
 
 # diagnose what's installed without changing anything
@@ -58,7 +79,12 @@ See [masterplan.md](./masterplan.md) for the full design and command reference.
 - **Resumable.** SQLite-backed ledger; Ctrl-C and rerun whenever.
 - **Own sitemap.** Crawl mode builds a discovered graph (`_sitemap.json` + tree-rendered `_sitemap.md`) from the links it actually walked.
 - **PDF export.** Bundle any folder of scraped pages into a single PDF — cover, TOC, embedded images, badged media links.
-- **Real TUI.** Textual screens for browsing jobs, watching progress live, inspecting output, kicking off new runs.
+- **Auth + HTTP cache.** Basic, Bearer, cookies file, arbitrary headers. On-disk cache via ETag / Last-Modified.
+- **Watch + diff.** Re-scrape on an interval, emit only what changed. Stand-alone `diff` command works on any two snapshots.
+- **Full-text search.** SQLite FTS5 across every scraped page. CLI command + TUI screen with live preview.
+- **Subdomain enumeration.** Optional crt.sh seeding before a crawl.
+- **PDF input.** Point it at a PDF URL — text + metadata get the same `content.md` / `metadata.json` treatment as an HTML page.
+- **Real TUI.** Textual screens for jobs, progress, inspector, search, live sitemap tree, diff view, and a settings editor.
 
 ## License
 

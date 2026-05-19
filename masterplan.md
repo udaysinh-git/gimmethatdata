@@ -97,12 +97,16 @@ uv run playwright install chromium
 
 | command | what it does |
 | --- | --- |
-| `scrape <urls...>` | per-page or batch (with `--urls-file`, `--job-id`, `--preset`, `--tier`, `--proxy`...) |
-| `crawl <seed>` | full-site crawl (depth + max-pages + scope + sitemap.xml seed) |
+| `scrape <urls...>` | per-page or batch (with `--urls-file`, `--job-id`, `--preset`, `--tier`, `--proxy`, `--auth`, `--cookie`, `--header`, `--cache-dir`, `--ocr`...) |
+| `crawl <seed>` | full-site crawl (depth + max-pages + scope + sitemap.xml seed + `--include-subdomains` from crt.sh) |
 | `resume <job-id>` | continue from where Ctrl-C left it |
+| `watch <url>` | periodic re-scrape/crawl, emits per-tick diff to `<out>/<ts>/_diff.md` |
+| `diff <before> <after>` | added/removed/changed pages between two snapshots, with unified-diff bodies |
+| `search <query>` | sqlite-FTS full-text search across every `content.md` under `--out` |
 | `sitemap <domain-dir>` | (re)build `_sitemap.json` + `_sitemap.md` from `_site.sqlite` |
+| `subdomains <url>` | discover subdomains via Certificate Transparency (crt.sh) |
 | `export-pdf <path>` | single PDF of every `content.md` under `<path>` with embedded images + media badges |
-| `tui` | launch the Textual app |
+| `tui` | launch the Textual app (Home / NewJob / Progress / Inspector / Search / Sitemap / Diff / Settings) |
 | `setup` / `doctor` | one-shot install / diagnose without touching anything |
 | `config` | print resolved settings |
 
@@ -118,9 +122,10 @@ The CLI + TUI both work end-to-end. Tested against `udaysinh.me` (28 pages disco
 
 - Distributed mode (redis-backed frontier across machines).
 - LLM-assisted content cleanup hook (opt-in, off by default).
-- Plugin extractors for the big sites (Reddit, Wikipedia, Twitter exports) shipped as separate packages.
-- Better viewer for the TUI inspector (asset preview pane, sitemap tree view).
+- More plugin extractors (Wikipedia, HN, Twitter/X exports) as separate packages.
+- Asset preview pane (inline images) on the inspector screen.
 - Browser extension that pushes URLs into the queue from the page you're on.
+- JSONL + EPUB exports alongside PDF.
 
 ## license
 

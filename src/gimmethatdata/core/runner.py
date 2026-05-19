@@ -13,6 +13,7 @@ from gimmethatdata.core.pipeline import RobotsBlocked, ScrapeOptions, scrape_one
 from gimmethatdata.core.url_utils import canonicalize
 from gimmethatdata.crawl.crawler import CrawlConfig, CrawlReport, crawl_site
 from gimmethatdata.crawl.frontier import ScopeMode, ScopeRule
+from gimmethatdata.fetch.auth import AuthConfig
 from gimmethatdata.fetch.factory import FetcherOptions, build_fetcher
 from gimmethatdata.fetch.robots import RobotsCache
 from gimmethatdata.fetch.tier1_httpx import FetchError
@@ -50,6 +51,8 @@ class ScrapeJobSpec:
     tier: str = "auto"
     proxy: str | None = None
     rate_limit: float = 2.0
+    auth: AuthConfig = field(default_factory=AuthConfig)
+    cache_dir: Path | None = None
 
 
 @dataclass
@@ -62,11 +65,14 @@ class CrawlJobSpec:
     allow: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
     use_sitemap: bool = True
+    include_subdomains: bool = False
     options: ScrapeOptions = field(default_factory=ScrapeOptions)
     timeout: float = 30.0
     tier: str = "auto"
     proxy: str | None = None
     rate_limit: float = 1.0
+    auth: AuthConfig = field(default_factory=AuthConfig)
+    cache_dir: Path | None = None
 
 
 async def _maybe_await(value: Any) -> None:
@@ -84,7 +90,13 @@ async def run_scrape_job(
     settings.fetch.timeout_seconds = spec.timeout
     fetcher = build_fetcher(
         settings,
-        FetcherOptions(tier=spec.tier, proxy=spec.proxy, rate_limit_rps=spec.rate_limit),
+        FetcherOptions(
+            tier=spec.tier,
+            proxy=spec.proxy,
+            rate_limit_rps=spec.rate_limit,
+            auth=spec.auth,
+            cache_dir=spec.cache_dir,
+        ),
     )
     robots = (
         RobotsCache(user_agent=settings.fetch.user_agent)
@@ -269,6 +281,7 @@ async def run_crawl_job(
         max_depth=spec.depth,
         max_pages=spec.max_pages,
         use_sitemap=spec.use_sitemap,
+        include_subdomains=spec.include_subdomains,
         scope=scope_rule,
         scrape_options=spec.options,
     )

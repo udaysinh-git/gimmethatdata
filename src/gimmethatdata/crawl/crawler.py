@@ -11,6 +11,7 @@ from gimmethatdata.core.url_utils import canonicalize, domain_of
 from gimmethatdata.crawl.frontier import Frontier, FrontierStatus, ScopeRule
 from gimmethatdata.crawl.sitemap import discover_sitemap_urls
 from gimmethatdata.crawl.sitemap_writer import write_sitemap
+from gimmethatdata.crawl.subdomain import discover_subdomain_seeds
 from gimmethatdata.fetch.base import Fetcher
 from gimmethatdata.fetch.robots import RobotsCache
 from gimmethatdata.fetch.tier1_httpx import FetchError
@@ -26,6 +27,7 @@ class CrawlConfig:
     max_depth: int = 2
     max_pages: int = 100
     use_sitemap: bool = True
+    include_subdomains: bool = False
     scope: ScopeRule | None = None
     scrape_options: ScrapeOptions = field(default_factory=ScrapeOptions)
 
@@ -68,6 +70,16 @@ async def crawl_site(
             if seeded:
                 added = await frontier.add(seeded)
                 _log.info("sitemap_seeded", count=added)
+        if config.include_subdomains:
+            sub_urls = await discover_subdomain_seeds(
+                seed_canonical, user_agent=settings.fetch.user_agent
+            )
+            sub_seeded = [
+                (u, 0, seed_canonical) for u in sub_urls if scope.includes(u)
+            ]
+            if sub_seeded:
+                added = await frontier.add(sub_seeded)
+                _log.info("subdomains_seeded", count=added)
 
         while True:
             if report.fetched >= config.max_pages:

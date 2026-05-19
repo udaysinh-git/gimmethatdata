@@ -43,7 +43,9 @@ class Extractor(Protocol):
 
 
 def _builtin_extractors() -> list[Extractor]:
-    return []
+    from gimmethatdata.parse.extractors import builtin_extractors
+
+    return list(builtin_extractors())
 
 
 def discover_extractors() -> list[Extractor]:

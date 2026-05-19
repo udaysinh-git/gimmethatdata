@@ -18,15 +18,26 @@ def test_app_instantiates(tmp_path: Path) -> None:
 
 
 def test_screens_importable() -> None:
+    from gimmethatdata.tui.screens.diff import DiffScreen
     from gimmethatdata.tui.screens.home import HomeScreen
     from gimmethatdata.tui.screens.inspector import InspectorScreen
     from gimmethatdata.tui.screens.new_job import NewJobScreen
     from gimmethatdata.tui.screens.progress import ProgressScreen
+    from gimmethatdata.tui.screens.search import SearchScreen
+    from gimmethatdata.tui.screens.settings import SettingsScreen
+    from gimmethatdata.tui.screens.sitemap import LiveSitemapScreen
 
-    assert HomeScreen is not None
-    assert InspectorScreen is not None
-    assert NewJobScreen is not None
-    assert ProgressScreen is not None
+    for cls in (
+        HomeScreen,
+        InspectorScreen,
+        NewJobScreen,
+        ProgressScreen,
+        SearchScreen,
+        SettingsScreen,
+        LiveSitemapScreen,
+        DiffScreen,
+    ):
+        assert cls is not None
 
 
 @pytest.mark.asyncio

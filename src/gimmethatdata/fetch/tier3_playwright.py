@@ -27,6 +27,7 @@ class PlaywrightFetcher:
         viewport: tuple[int, int] = (1366, 768),
         locale: str = "en-US",
         wait_until: WaitUntil = "domcontentloaded",
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         self._user_agent = user_agent
         self._timeout_ms = int(timeout_seconds * 1000)
@@ -34,6 +35,7 @@ class PlaywrightFetcher:
         self._viewport = viewport
         self._locale = locale
         self._wait_until = wait_until
+        self._extra_headers = extra_headers or {}
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
@@ -53,6 +55,7 @@ class PlaywrightFetcher:
             user_agent=self._user_agent,
             viewport={"width": self._viewport[0], "height": self._viewport[1]},
             locale=self._locale,
+            extra_http_headers=self._extra_headers or None,
         )
         self._context.set_default_timeout(self._timeout_ms)
 

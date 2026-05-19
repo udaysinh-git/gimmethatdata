@@ -35,6 +35,10 @@ class GimmeApp(App[None]):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("n", "new_job", "New job"),
+        Binding("s", "open_search", "Search"),
+        Binding("m", "open_sitemap", "Sitemap"),
+        Binding("d", "open_diff", "Diff"),
+        Binding("comma", "open_settings", "Settings"),
         Binding("question_mark", "help", "Help"),
     ]
 
@@ -54,11 +58,44 @@ class GimmeApp(App[None]):
 
         self.push_screen(NewJobScreen(out_root=self.out_root))
 
+    def action_open_search(self) -> None:
+        from gimmethatdata.tui.screens.search import SearchScreen
+
+        self.push_screen(SearchScreen(out_root=self.out_root))
+
+    def action_open_sitemap(self) -> None:
+        from gimmethatdata.tui.screens.sitemap import LiveSitemapScreen
+
+        domain_dir = _guess_domain_dir(self.out_root)
+        if domain_dir is None:
+            self.notify("No `_site.sqlite` found anywhere under out_root yet.", title="Sitemap")
+            return
+        self.push_screen(LiveSitemapScreen(domain_dir=domain_dir))
+
+    def action_open_diff(self) -> None:
+        from gimmethatdata.tui.screens.diff import DiffScreen
+
+        self.push_screen(DiffScreen())
+
+    def action_open_settings(self) -> None:
+        from gimmethatdata.tui.screens.settings import SettingsScreen
+
+        self.push_screen(SettingsScreen())
+
     def action_help(self) -> None:
         self.notify(
-            "n: new job · r: resume · o: open output · /: filter · q: quit",
+            "n: new · s: search · m: sitemap · d: diff · ,: settings · q: quit",
             title="Help",
         )
+
+
+def _guess_domain_dir(out_root: Path) -> Path | None:
+    """Pick the first directory under out_root that has a `_site.sqlite`."""
+    if not out_root.exists():
+        return None
+    for path in out_root.rglob("_site.sqlite"):
+        return path.parent
+    return None
 
 
 def run_tui(out_root: Path = Path("out")) -> None:

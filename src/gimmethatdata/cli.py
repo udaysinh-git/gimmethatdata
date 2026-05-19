@@ -109,6 +109,41 @@ def scrape(
         float,
         typer.Option("--rate-limit", help="Per-domain requests per second."),
     ] = 2.0,
+    auth: Annotated[
+        str | None,
+        typer.Option(
+            "--auth",
+            help="Auth credentials. Format: basic:user:pass  or  bearer:<token>.",
+        ),
+    ] = None,
+    cookie: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--cookie",
+            help="Cookie pair (k=v). Repeatable; can also be a full 'k=v; k2=v2' string.",
+        ),
+    ] = None,
+    cookies_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--cookies-file",
+            help="Path to a Netscape-format cookies.txt file.",
+        ),
+    ] = None,
+    header: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--header", "-H",
+            help="Extra request header 'Name: Value'. Repeatable.",
+        ),
+    ] = None,
+    cache_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--cache-dir",
+            help="Enable on-disk HTTP cache (ETag/Last-Modified) at the given dir.",
+        ),
+    ] = None,
     download_audio: Annotated[
         bool, typer.Option("--download-audio", help="Download discovered audio files.")
     ] = False,
@@ -171,6 +206,11 @@ def scrape(
             tier=tier,
             proxy=proxy,
             rate_limit=rate_limit,
+            auth_arg=auth,
+            cookies_arg=cookie,
+            cookies_file=cookies_file,
+            headers_arg=header,
+            cache_dir=cache_dir,
             preset_name=preset,
             ocr=ocr,
         )
@@ -222,11 +262,17 @@ async def _run_scrape(
     tier: str,
     proxy: str | None,
     rate_limit: float,
+    auth_arg: str | None,
+    cookies_arg: list[str] | None,
+    cookies_file: Path | None,
+    headers_arg: list[str] | None,
+    cache_dir: Path | None,
     preset_name: str,
     ocr: bool,
 ) -> None:
     from gimmethatdata.core.pipeline import ScrapeOptions
     from gimmethatdata.core.runner import ScrapeJobSpec
+    from gimmethatdata.fetch.auth import AuthConfig
     from gimmethatdata.parse.plugins import discover_extractors
     from gimmethatdata.parse.presets import Preset
 
@@ -253,6 +299,16 @@ async def _run_scrape(
         enable_ocr=ocr,
         extractors=discover_extractors(),
     )
+    try:
+        auth_cfg = AuthConfig.from_cli(
+            auth=auth_arg,
+            cookies_arg=cookies_arg,
+            cookies_file=cookies_file,
+            headers_arg=headers_arg,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
     spec = ScrapeJobSpec(
         urls=urls,
         out=out,
@@ -262,6 +318,8 @@ async def _run_scrape(
         tier=tier,
         proxy=proxy,
         rate_limit=rate_limit,
+        auth=auth_cfg,
+        cache_dir=cache_dir,
     )
     await _run_with_cli_progress(spec=spec)
 
@@ -352,6 +410,13 @@ def crawl(
         bool,
         typer.Option("--use-sitemap/--no-sitemap", help="Seed frontier from sitemap.xml."),
     ] = True,
+    include_subdomains: Annotated[
+        bool,
+        typer.Option(
+            "--include-subdomains",
+            help="Seed frontier from crt.sh-discovered subdomains too.",
+        ),
+    ] = False,
     tier: Annotated[str, typer.Option("--tier")] = "auto",
     proxy: Annotated[str | None, typer.Option("--proxy")] = None,
     rate_limit: Annotated[float, typer.Option("--rate-limit")] = 1.0,
@@ -381,6 +446,7 @@ def crawl(
             allow=allow or [],
             deny=deny or [],
             use_sitemap=use_sitemap,
+            include_subdomains=include_subdomains,
             tier=tier,
             proxy=proxy,
             rate_limit=rate_limit,
@@ -400,6 +466,7 @@ async def _run_crawl(
     allow: list[str],
     deny: list[str],
     use_sitemap: bool,
+    include_subdomains: bool,
     tier: str,
     proxy: str | None,
     rate_limit: float,
@@ -423,6 +490,7 @@ async def _run_crawl(
         allow=allow,
         deny=deny,
         use_sitemap=use_sitemap,
+        include_subdomains=include_subdomains,
         options=ScrapeOptions(respect_robots=respect_robots),
         timeout=timeout,
         tier=tier,
@@ -553,6 +621,222 @@ async def _run_sitemap(*, domain_dir: Path, seed: str | None) -> None:
     json_path, md_path = await write_sitemap_from_frontier(domain_dir, seed=seed)
     console.print(f"[green]wrote[/] {json_path}")
     console.print(f"[green]wrote[/] {md_path}")
+
+
+@app.command()
+def search(
+    query: Annotated[str, typer.Argument(help="FTS query — supports phrases + multi-word.")],
+    out: Annotated[
+        Path,
+        typer.Option("--out", "-o", help="Out-root that holds scraped pages + index."),
+    ] = Path("out"),
+    reindex: Annotated[
+        bool,
+        typer.Option("--reindex", help="Rebuild the FTS index before searching."),
+    ] = False,
+    limit: Annotated[
+        int, typer.Option("--limit", help="Max hits to print.")
+    ] = 25,
+) -> None:
+    """Full-text search across every scraped `content.md` under `--out`."""
+    from gimmethatdata.persist.search import SearchIndex, index_all
+
+    if reindex or not (out / "_search.sqlite").exists():
+        if not out.exists():
+            raise typer.BadParameter(f"out-root does not exist: {out}")
+        count = index_all(out)
+        console.print(f"[cyan]indexed[/] {count} pages -> {out / '_search.sqlite'}")
+    with SearchIndex(out / "_search.sqlite") as idx:
+        hits = idx.search(query, limit=limit)
+    if not hits:
+        console.print("[yellow]no matches[/]")
+        return
+    for hit in hits:
+        console.print(f"[bold]{hit.title}[/] · [dim]{hit.url}[/]")
+        if hit.snippet:
+            console.print(f"  {hit.snippet}", style="dim")
+        console.print()
+    console.print(f"[bold]{len(hits)} hits[/]")
+
+
+@app.command()
+def diff(
+    before: Annotated[Path, typer.Argument(help="Older snapshot directory.")],
+    after: Annotated[Path, typer.Argument(help="Newer snapshot directory.")],
+    out: Annotated[
+        Path | None,
+        typer.Option(
+            "--out", "-o",
+            help="Write the diff to this Markdown file (default: stdout).",
+        ),
+    ] = None,
+) -> None:
+    """Compare two scrape snapshots; surface added / removed / changed pages."""
+    from gimmethatdata.export.diff import compute_diff, render_diff_markdown
+
+    if not before.exists():
+        raise typer.BadParameter(f"before path does not exist: {before}")
+    if not after.exists():
+        raise typer.BadParameter(f"after path does not exist: {after}")
+    diff_result = compute_diff(before, after)
+    summary = diff_result.summary()
+    console.print(
+        f"[bold]diff[/] · added={summary['added']} removed={summary['removed']} "
+        f"changed={summary['changed']} unchanged={summary['unchanged']}"
+    )
+    md = render_diff_markdown(diff_result)
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(md, encoding="utf-8")
+        console.print(f"[green]wrote[/] {out}")
+    else:
+        console.print(md)
+
+
+@app.command()
+def watch(
+    target: Annotated[
+        str,
+        typer.Argument(help="URL to scrape (single page) or seed URL to crawl each tick."),
+    ],
+    every: Annotated[
+        str, typer.Option("--every", help="Interval: 30s, 5m, 1h, 12d.")
+    ] = "1h",
+    mode: Annotated[
+        str,
+        typer.Option(
+            "--mode",
+            help="Per-tick action: `scrape` (single page) or `crawl` (full site).",
+        ),
+    ] = "scrape",
+    iterations: Annotated[
+        int | None,
+        typer.Option(
+            "--iterations", "-n",
+            help="Stop after this many ticks (default: run forever).",
+        ),
+    ] = None,
+    out: Annotated[
+        Path,
+        typer.Option("--out", "-o", help="Root dir for snapshots."),
+    ] = Path("watch"),
+    depth: Annotated[
+        int, typer.Option("--depth", help="Crawl depth (mode=crawl only).")
+    ] = 1,
+    max_pages: Annotated[
+        int, typer.Option("--max-pages", help="Crawl page cap (mode=crawl only).")
+    ] = 50,
+) -> None:
+    """Re-scrape periodically and diff each run against the previous one."""
+    from gimmethatdata.core.watch import parse_interval
+
+    try:
+        interval = parse_interval(every)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if mode not in {"scrape", "crawl"}:
+        raise typer.BadParameter("--mode must be 'scrape' or 'crawl'")
+    asyncio.run(
+        _run_watch(
+            target=target,
+            interval_seconds=interval,
+            mode=mode,
+            iterations=iterations,
+            out=out,
+            depth=depth,
+            max_pages=max_pages,
+        )
+    )
+
+
+async def _run_watch(
+    *,
+    target: str,
+    interval_seconds: float,
+    mode: str,
+    iterations: int | None,
+    out: Path,
+    depth: int,
+    max_pages: int,
+) -> None:
+    from gimmethatdata.core.pipeline import ScrapeOptions
+    from gimmethatdata.core.runner import (
+        CrawlJobSpec,
+        ScrapeJobSpec,
+        run_crawl_job,
+        run_scrape_job,
+    )
+    from gimmethatdata.core.watch import WatchTick, watch_loop
+    from gimmethatdata.crawl.frontier import ScopeMode
+
+    async def runner(snapshot_dir: Path) -> None:
+        if mode == "scrape":
+            scrape_spec = ScrapeJobSpec(
+                urls=[target],
+                out=snapshot_dir,
+                options=ScrapeOptions(),
+            )
+            await run_scrape_job(scrape_spec)
+        else:
+            crawl_spec = CrawlJobSpec(
+                seed_url=target,
+                out=snapshot_dir,
+                depth=depth,
+                max_pages=max_pages,
+                scope=ScopeMode.SAME_DOMAIN,
+                options=ScrapeOptions(),
+            )
+            await run_crawl_job(crawl_spec)
+
+    async def on_tick(tick: WatchTick) -> None:
+        if tick.diff is None:
+            console.print(f"[cyan]tick {tick.index}[/] baseline snapshot @ {tick.snapshot_dir}")
+            return
+        summary = tick.diff.summary()
+        console.print(
+            f"[cyan]tick {tick.index}[/] · added={summary['added']} "
+            f"removed={summary['removed']} changed={summary['changed']} "
+            f"unchanged={summary['unchanged']} @ {tick.snapshot_dir}"
+        )
+
+    await watch_loop(
+        interval_seconds=interval_seconds,
+        runner=runner,
+        snapshots_root=out,
+        iterations=iterations,
+        on_tick=on_tick,
+    )
+
+
+@app.command()
+def subdomains(
+    seed: Annotated[
+        str, typer.Argument(help="Base URL or domain — e.g. https://example.com or example.com")
+    ],
+    max_results: Annotated[
+        int, typer.Option("--max", help="Cap on returned subdomains.")
+    ] = 200,
+) -> None:
+    """Discover subdomains via Certificate Transparency (crt.sh)."""
+    asyncio.run(_run_subdomains(seed, max_results))
+
+
+async def _run_subdomains(seed: str, max_results: int) -> None:
+    from gimmethatdata.config import load_settings
+    from gimmethatdata.crawl.subdomain import discover_subdomains
+
+    settings = load_settings()
+    if "://" not in seed:
+        seed = f"https://{seed}/"
+    hosts = await discover_subdomains(
+        seed, user_agent=settings.fetch.user_agent, max_subdomains=max_results
+    )
+    if not hosts:
+        console.print("[yellow]no subdomains found[/]")
+        return
+    for host in hosts:
+        console.print(host)
+    console.print(f"\n[bold]{len(hosts)} subdomains[/]")
 
 
 @app.command(name="export-pdf")

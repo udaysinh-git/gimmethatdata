@@ -49,6 +49,7 @@ bypass = [
 media = [
     "yt-dlp>=2024.8.6",
     "Pillow>=10.4",
+    "pypdf>=4.3",
 ]
 state = [
     "aiosqlite>=0.20",
@@ -140,6 +141,7 @@ module = [
     "playwright_stealth.*",
     "pytesseract",
     "markdown",
+    "pypdf",
 ]
 ignore_missing_imports = true
 

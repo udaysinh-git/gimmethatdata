@@ -383,6 +383,160 @@ async def _run_with_cli_progress(*, spec: object) -> None:
             )
             raise
 
+@app.command()
+def media(
+    url: Annotated[
+        str,
+        typer.Argument(help="Page URL containing video or audio media."),
+    ],
+    out: Annotated[
+        Path,
+        typer.Option("--out", "-o", help="Output directory."),
+    ] = Path("out"),
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", help="Per-request timeout in seconds."),
+    ] = 30.0,
+    tier: Annotated[
+        str,
+        typer.Option(
+            "--tier",
+            help="Fetch tier: auto, 1 (httpx), 2 (curl_cffi), "
+            "3 (playwright), 4 (flaresolverr).",
+        ),
+    ] = "auto",
+    proxy: Annotated[
+        str | None,
+        typer.Option("--proxy", help="Proxy URL."),
+    ] = None,
+    rate_limit: Annotated[
+        float,
+        typer.Option("--rate-limit", help="Per-domain requests per second."),
+    ] = 2.0,
+) -> None:
+    """Sniff and download media from a page."""
+    asyncio.run(
+        _run_media(
+            url=url,
+            out=out,
+            timeout=timeout,
+            tier=tier,
+            proxy=proxy,
+            rate_limit=rate_limit,
+        )
+    )
+
+
+async def _run_media(
+    *,
+    url: str,
+    out: Path,
+    timeout: float,  # noqa: ASYNC109
+    tier: str,
+    proxy: str | None,
+    rate_limit: float,
+) -> None:
+    """Run the universal media sniffer."""
+    from gimmethatdata.config import load_settings
+    from gimmethatdata.core.models import AssetKind, AssetRef, PageMetadata
+    from gimmethatdata.core.url_utils import derive_output_dir
+    from gimmethatdata.fetch.factory import FetcherOptions, build_fetcher
+    from gimmethatdata.media.sniffer import sniff_media
+    from gimmethatdata.persist.writer import write_page
+
+    settings = load_settings()
+    settings.fetch.timeout_seconds = timeout
+
+    fetcher = build_fetcher(
+        settings,
+        FetcherOptions(
+            tier=tier,
+            proxy=proxy,
+            rate_limit_rps=rate_limit,
+        ),
+    )
+
+    try:
+        output_dir = derive_output_dir(
+            out,
+            url,
+        )
+
+        result = await sniff_media(
+            url,
+            fetcher=fetcher,
+            out_dir=output_dir,
+        )
+        assets = []
+
+        for item in result.media:
+            try:
+                kind = AssetKind(item["kind"])
+            except (KeyError, ValueError):
+                continue
+
+            if kind not in {
+                AssetKind.VIDEO,
+                AssetKind.AUDIO,
+                AssetKind.IMAGE,
+            }:
+                continue
+
+            media_url = item.get("url")
+            if not media_url:
+                continue
+
+            assets.append(
+                AssetRef(
+                    kind=kind,
+                    url=media_url,
+                    abs_url=media_url,
+                    title=item.get("title"),
+                    alt=item.get("alt"),
+                    width=item.get("width"),
+                    height=item.get("height"),
+                    mime=item.get("mime"),
+                    local_path=item.get("local_path"),
+                    bytes=item.get("bytes"),
+                )
+            )
+
+        links = result.links
+
+        metadata = PageMetadata(
+            url=url,
+            final_url=result.metadata.get("final_url", url),
+            title=result.metadata.get("title"),
+            description=result.metadata.get("description"),
+            status_code=result.metadata.get("status_code", 200),
+            tier=result.metadata.get("tier"),
+            elapsed_ms=result.metadata.get("elapsed_ms", 0),
+        )
+
+        write_page(
+            output_dir,
+            content_md=result.content_md,
+            metadata=metadata,
+            assets=assets,
+            links=links,
+        )
+
+        console.print(
+            f"[green]media sniffed[/] {url}"
+        )
+        console.print(
+            f"Output: [cyan]{output_dir}[/]"
+        )
+        console.print(
+            f"Media found: [bold]{len(result.media)}[/]"
+        )
+
+        if result.thumbnail:
+            console.print(
+                f"Thumbnail: [cyan]{result.thumbnail}[/]"
+            )
+    finally:
+        await fetcher.aclose()
 
 @app.command()
 def crawl(

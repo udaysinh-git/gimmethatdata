@@ -53,13 +53,18 @@ async def download_via_ytdlp(
         return asset
     videos_dir = ensure_dir(out_dir / "assets" / "videos")
     output_template = str(videos_dir / "%(id)s.%(ext)s")
-    format_string = f"{opts.format}[height<={opts.max_resolution}]"
+    format_string = (
+        f"best[height<={opts.max_resolution}][ext=mp4]/"
+        f"best[height<={opts.max_resolution}]/best"
+    )
     args = [
         "--no-playlist",
         "--restrict-filenames",
         "--no-progress",
         "--quiet",
         "--print-json",
+        "--remote-components",
+        "ejs:github",
         "-f", format_string,
         "-o", output_template,
         asset.abs_url,
@@ -83,6 +88,12 @@ async def download_via_ytdlp(
     bytes_: int | None = None
     if local_filename:
         local_path = Path(local_filename)
+
+        # yt-dlp may return a relative filename.
+        # Resolve it against the videos directory in that case.
+        if not local_path.is_absolute():
+            local_path = videos_dir / local_path
+
         if local_path.exists():
             local_rel = str(local_path.relative_to(out_dir)).replace("\\", "/")
             bytes_ = local_path.stat().st_size
@@ -96,6 +107,102 @@ async def download_via_ytdlp(
         }
     )
 
+async def download_url_via_ytdlp(
+    url: str,
+    out_dir: Path,
+    *,
+    opts: YtDlpOptions,
+) -> AssetRef | None:
+    """Download media from any URL supported by yt-dlp."""
+    videos_dir = ensure_dir(out_dir / "assets" / "videos")
+    output_template = str(videos_dir / "%(id)s.%(ext)s")
+
+    format_string = (
+        f"best[height<={opts.max_resolution}][ext=mp4]/"
+        f"best[height<={opts.max_resolution}]/best"
+    )
+
+    args = [
+        "--no-playlist",
+        "--restrict-filenames",
+        "--no-progress",
+        "--quiet",
+        "--print-json",
+        "--remote-components",
+        "ejs:github",
+        "-f",
+        format_string,
+        "-o",
+        output_template,
+        url,
+    ]
+
+    try:
+        code, stdout, stderr = await _run_ytdlp(args)
+    except FileNotFoundError:
+        _log.warning("ytdlp_not_installed", url=url)
+        return None
+
+    if code != 0:
+        _log.warning(
+            "ytdlp_failed",
+            url=url,
+            stderr=stderr[:500],
+        )
+        return None
+
+    try:
+        info = json.loads(
+            stdout.strip().splitlines()[-1]
+        )
+    except (json.JSONDecodeError, IndexError):
+        _log.warning("ytdlp_no_info", url=url)
+        return None
+
+    local_filename = (
+        info.get("_filename")
+        or info.get("filepath")
+    )
+
+    if not local_filename:
+        return None
+
+    local_path = Path(local_filename)
+
+    if not local_path.is_absolute():
+        local_path = videos_dir / local_path
+
+    if not local_path.exists():
+        return None
+
+    try:
+        local_rel = str(
+            local_path.relative_to(out_dir)
+        ).replace("\\", "/")
+    except ValueError:
+        local_rel = str(local_path)
+
+    video_codec = info.get("vcodec")
+    audio_codec = info.get("acodec")
+
+    if video_codec and video_codec != "none":
+        kind = AssetKind.VIDEO
+    elif audio_codec and audio_codec != "none":
+        kind = AssetKind.AUDIO
+    else:
+        kind = AssetKind.OTHER
+
+    return AssetRef(
+        kind=kind,
+        url=url,
+        abs_url=url,
+        title=info.get("title"),
+        width=info.get("width"),
+        height=info.get("height"),
+        mime=info.get("mime"),
+        local_path=local_rel,
+        bytes=local_path.stat().st_size,
+    )
 
 async def download_embeds(
     assets: list[AssetRef],
